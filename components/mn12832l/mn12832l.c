@@ -592,7 +592,7 @@ shutdown_cumulative:
   return err;
 }
 
-/* Manual 8-column cumulative fill for frame-by-frame observations.
+/* Manual 16-column cumulative fill for frame-by-frame observations.
  * Send a space through the primary ESP-IDF serial console to add a column;
  * 'q' exits. The displayed frame is continuously multiplexed even while
  * waiting for input, with a global and idle timeout for supervised operation.
@@ -603,7 +603,7 @@ shutdown_cumulative:
  */
 esp_err_t mn12832l_spi_manual_fill_test(void) {
   enum {
-    WIDTH = 8,
+    WIDTH = 16,
     STRIP_Y_START = 8,
     STRIP_Y_END = 24,
     MAX_ON_US = 120000000,
@@ -633,9 +633,9 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
   }
   mn12832l_encode_frame(framebuffer, scans);
 
-  printf("MN12832L manual fill: X=0..7, Y=8..23.\n");
+  printf("MN12832L manual fill: X=0..15, Y=8..23.\n");
   printf("Press SPACE once for each next column, q to quit.\n");
-  printf("After column 8, another SPACE ends the test.\n");
+  printf("After column 16, another SPACE ends the test.\n");
   printf("Auto-off: 30 seconds idle or 120 seconds total HV-on.\n");
   fflush(stdout);
 
@@ -644,7 +644,7 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
   gpio_set_level(PIN_HV, 1);
   on_start = esp_timer_get_time();
   last_input = on_start;
-  printf("COLUMN 1/8: logical X=0 lit\n");
+  printf("COLUMN 1/16: logical X=0 lit\n");
   fflush(stdout);
 
   while (!finished) {
