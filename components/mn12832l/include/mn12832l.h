@@ -18,3 +18,4 @@ void mn12832l_test_sweep(void);
 /* Hardware-SPI transport tests. The illumination test powers down on return. */
 esp_err_t mn12832l_spi_dry_run(const uint8_t *framebuffer);
 esp_err_t mn12832l_spi_illumination_test(const uint8_t *framebuffer);
+esp_err_t mn12832l_spi_column_walk(void);

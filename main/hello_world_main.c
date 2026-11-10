@@ -86,6 +86,8 @@ void app_main(void) {
   // diagnostics BEFORE the first SPI call, never concurrently with it.
   ESP_ERROR_CHECK(mn12832l_spi_dry_run(frame));
 
-  // Short, supervised bench test; HV and filament are disabled on return.
-  ESP_ERROR_CHECK(mn12832l_spi_illumination_test(frame));
+  // Short, supervised X=0..17 column-mapping test. The original text test
+  // remains available once we've established the physical column order.
+  ESP_ERROR_CHECK(mn12832l_spi_column_walk());
+  // ESP_ERROR_CHECK(mn12832l_spi_illumination_test(frame));
 }

@@ -270,6 +270,55 @@ shutdown:
   return err;
 }
 
+/* Walk a single 16-pixel-tall vertical segment through 18 logical columns.
+ * The serial log identifies each position so a repeated/missing physical
+ * column can be matched to the encoder. This is intentionally bench-only. */
+esp_err_t mn12832l_spi_column_walk(void) {
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  enum { WALK_COLUMNS = 18, WALK_HOLD_US = 650000 };
+  uint8_t framebuffer[128 * 32 / 8];
+  uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+
+  printf("MN12832L SPI column walk: X=0..17, 650 ms each; Y=8..23\n");
+  for (int x = 0; x < WALK_COLUMNS; ++x) {
+    // I1 pixels are active-low. Keep every other pixel off.
+    memset(framebuffer, 0xFF, sizeof(framebuffer));
+    for (int y = 8; y < 24; ++y) {
+      framebuffer[y * 16 + x / 8] &= (uint8_t)~(0x80u >> (x % 8));
+    }
+    mn12832l_encode_frame(framebuffer, scans);
+
+    printf("COLUMN X=%02d (step %d/%d)\n", x, x + 1, WALK_COLUMNS);
+    fflush(stdout);
+    int64_t deadline = esp_timer_get_time() + WALK_HOLD_US;
+    do {
+      for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
+        err = mn12832l_spi_scan(scans[scan], true);
+        if (err != ESP_OK) {
+          goto shutdown_walk;
+        }
+      }
+    } while (esp_timer_get_time() < deadline);
+  }
+
+shutdown_walk:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L SPI column walk finished: %s\n", esp_err_to_name(err));
+  return err;
+}
+
 static void mn12832l_refresh_dry_run(
     uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES]) {
   // Keep the display safely disabled.
