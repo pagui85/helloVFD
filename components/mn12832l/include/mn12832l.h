@@ -24,3 +24,4 @@ esp_err_t mn12832l_spi_grid_walk(void);
 esp_err_t mn12832l_spi_anode_walk(void);
 esp_err_t mn12832l_spi_grid_pair_test(void);
 esp_err_t mn12832l_spi_cumulative_fill_test(void);
+esp_err_t mn12832l_spi_manual_fill_test(void);
