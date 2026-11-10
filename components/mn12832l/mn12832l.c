@@ -719,6 +719,12 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
       }
     }
 
+    /* The refresh loop otherwise runs continuously on CPU0 and starves
+     * IDLE0, triggering the ESP-IDF task watchdog. Briefly yield once per
+     * full 44-scan frame; the display remains blanked after the last scan.
+     * Never disable the task watchdog to conceal a scheduling bug. */
+    vTaskDelay(1);
+
     /* The default ESP-IDF console VFS is non-blocking. Direct read
      * bypasses stdio's newline-oriented input buffering. */
     char key;
