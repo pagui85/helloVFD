@@ -86,8 +86,9 @@ void app_main(void) {
   // diagnostics BEFORE the first SPI call, never concurrently with it.
   ESP_ERROR_CHECK(mn12832l_spi_dry_run(frame));
 
-  // Complete the same G4/G5 isolation experiment for anodes C through F.
-  ESP_ERROR_CHECK(mn12832l_spi_grid_pair_test());
+  // Supervised bounded diagnostic: grow then erase a 16-row vertical bar.
+  ESP_ERROR_CHECK(mn12832l_spi_cumulative_fill_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_grid_pair_test());
   // ESP_ERROR_CHECK(mn12832l_spi_anode_walk());
   // ESP_ERROR_CHECK(mn12832l_spi_phase_shift_test(frame));
   // ESP_ERROR_CHECK(mn12832l_spi_grid_walk());
