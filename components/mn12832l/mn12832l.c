@@ -942,7 +942,7 @@ static const mn12832l_physical_column_t mn12832l_first24_map[24] = {
     {2, 'A'}, {2, 'B'}, {2, 'C'}, /* 1..3, G2 measured */
     {2, 'D'}, {3, 'E'}, {3, 'F'}, /* 4..6, G3 E/F stronger */
     {3, 'A'}, {4, 'B'}, {4, 'C'}, /* 7..9, G4 C unverified */
-    {4, 'D'}, {4, 'E'}, {5, 'F'}, /* 10..12, strongest measured */
+    {4, 'D'}, {5, 'E'}, {5, 'F'}, /* 10..12, preferred grids measured */
     {5, 'A'}, {5, 'B'}, {6, 'C'}, /* 13..15, G6 C unverified */
     {6, 'D'}, {6, 'E'}, {6, 'F'}, /* 16..18, E/F provisional */
     {7, 'A'}, {7, 'B'}, {7, 'C'}, /* 19..21, inferred */
@@ -993,18 +993,19 @@ esp_err_t mn12832l_spi_first24_corrected_test(void) {
 
   esp_err_t err = mn12832l_spi_init();
   if (err != ESP_OK) return err;
-  int pattern = 0;
-  int single_col = 1;
+  int pattern = 4;
+  int single_col = 10;
   uint32_t measured_frames = 0;
   int64_t on_start, last_input, measurement_start;
 
   gpio_set_level(PIN_BLK, 1);
   gpio_set_level(PIN_HV, 0);
   gpio_set_level(PIN_EF, 0);
-  mn12832l_encode_first24_pattern(masks[0], scans, active_slots);
+  mn12832l_encode_first24_pattern(1u << 9, scans, active_slots);
 
   printf("MN12832L EXPERIMENTAL single-grid encoder, physical columns 1..24\n");
-  printf("Keys: 1=all, 2=odd, 3=even, 4=8+16+24, 5=single; n/p=step single; 0=off; q=quit\n");
+  printf("Keys: 6=col10, 7=col11, 8=col12, 9=all three; 1=all24, 2=odd, 3=even, 4=8+16+24, 5=single\n");
+  printf("n/p=step single column (1..24); 0=off; q=quit\n");
   printf("Provisional map in firmware; 250us per scan slot; 5min idle/15min HV maximum\n");
   fflush(stdout);
 
@@ -1013,7 +1014,7 @@ esp_err_t mn12832l_spi_first24_corrected_test(void) {
   gpio_set_level(PIN_HV, 1);
   on_start = esp_timer_get_time();
   last_input = measurement_start = on_start;
-  printf("PATTERN 1: ALL 1..24\n");
+  printf("FIRST24 SINGLE col 10: G4/D (preferred)\n");
   fflush(stdout);
 
   for (;;) {
@@ -1056,8 +1057,14 @@ esp_err_t mn12832l_spi_first24_corrected_test(void) {
       }
       bool accepted = true;
       bool force_off = false;
+      bool group_10_12 = false;
       if (key >= '1' && key <= '5') {
         pattern = key - '1';
+      } else if (key >= '6' && key <= '8') {
+        pattern = 4;
+        single_col = 10 + (key - '6');
+      } else if (key == '9') {
+        group_10_12 = true;
       } else if (key == 'n' || key == 'N' || key == ' ') {
         pattern = 4;
         single_col = single_col == 24 ? 1 : single_col + 1;
@@ -1073,6 +1080,7 @@ esp_err_t mn12832l_spi_first24_corrected_test(void) {
       gpio_set_level(PIN_BLK, 1);
       uint32_t column_mask = pattern == 4
           ? (1u << (single_col - 1)) : masks[pattern];
+      if (group_10_12) column_mask = (1u << 9) | (1u << 10) | (1u << 11);
       if (force_off) column_mask = 0;
       mn12832l_encode_first24_pattern(column_mask, scans, active_slots);
       last_input = esp_timer_get_time();
@@ -1080,6 +1088,8 @@ esp_err_t mn12832l_spi_first24_corrected_test(void) {
       measured_frames = 0;
       if (force_off) {
         printf("FIRST24 ALL OFF\n");
+      } else if (group_10_12) {
+        printf("FIRST24 10+11+12: G4/D + G5/E,F\n");
       } else if (pattern == 4) {
         const mn12832l_physical_column_t *m =
             &mn12832l_first24_map[single_col - 1];
