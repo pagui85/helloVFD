@@ -6,7 +6,8 @@ static uint8_t framebuffer[VFD_BUFFER_SIZE];
 
 void vfd_framebuffer_init(void)
 {
-    memset(framebuffer, 0, sizeof(framebuffer));
+    // LVGL I1 uses cleared bits for illuminated pixels; 0xFF is all off.
+    memset(framebuffer, 0xFF, sizeof(framebuffer));
 }
 
 void vfd_framebuffer_copy(const uint8_t *pixels)

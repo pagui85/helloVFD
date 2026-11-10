@@ -1,10 +1,13 @@
-/* MN12832L board serial-output probe; ESP-IDF 5.x/6.x, ESP32-S3.
- * Does not control filament, high voltage, or display latches.
- * IMPORTANT: Verify logic levels and BLK safe state before connecting.
+/* MN12832L ESP32-S3 driver and diagnostics.
+ * The bit-banged shift routine is retained for serial-chain readback.
+ * The SPI path uses the same GPIO11/GPIO12 wiring and is the only transport
+ * used by the short production-speed illumination experiment.
  */
 #include "driver/gpio.h"
+#include "driver/spi_master.h"
 #include "esp_err.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdbool.h>
@@ -25,6 +28,55 @@
 #define PIN_EF GPIO_NUM_18
 
 #define MN12832L_FRAME_BYTES 30
+#define MN12832L_SCAN_COUNT 44
+#define MN12832L_SPI_HZ 2000000
+
+static spi_device_handle_t spi_device;
+
+/* Must be called only after mn12832l_init() and after all bit-bang tests.
+ * SPI takes ownership of SIN and CLK through the GPIO matrix. */
+static esp_err_t mn12832l_spi_init(void) {
+  if (spi_device != NULL) {
+    return ESP_OK;
+  }
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+
+  spi_bus_config_t bus = {
+      .mosi_io_num = PIN_SIN,
+      .miso_io_num = -1,
+      .sclk_io_num = PIN_CLK,
+      .quadwp_io_num = -1,
+      .quadhd_io_num = -1,
+      .max_transfer_sz = MN12832L_FRAME_BYTES,
+  };
+  esp_err_t err = spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_DISABLED);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  spi_device_interface_config_t dev = {
+      .clock_speed_hz = MN12832L_SPI_HZ,
+      .mode = 0,
+      .spics_io_num = -1, // The VFD has no chip-select pin.
+      .queue_size = 1,
+  };
+  err = spi_bus_add_device(SPI2_HOST, &dev, &spi_device);
+  if (err != ESP_OK) {
+    spi_bus_free(SPI2_HOST);
+  }
+  return err;
+}
+
+static esp_err_t mn12832l_spi_shift(const uint8_t *data) {
+  spi_transaction_t transfer = {
+      .length = MN12832L_FRAME_BYTES * 8,
+      .tx_buffer = data,
+  };
+  return spi_device_polling_transmit(spi_device, &transfer);
+}
 
 static void mn12832l_shift_bits(const uint8_t *data, size_t bit_count,
                                 uint8_t *so1_capture, uint8_t *so2_capture);
@@ -81,12 +133,12 @@ static void mn12832l_encode_scan(const uint8_t *framebuffer, uint8_t scan,
     return;
   }
 
-// Select the overlapping grid pair.
-if (scan > 0) {
+  // Select the overlapping grid pair.
+  if (scan > 0) {
     mn12832l_select_grid(output, scan);
-}
+  }
 
-mn12832l_select_grid(output, scan + 1);
+  mn12832l_select_grid(output, scan + 1);
 
   // Three pixel columns per scan.
   unsigned start_x = scan * 3;
@@ -117,14 +169,105 @@ mn12832l_select_grid(output, scan + 1);
   }
 }
 
-#define MN12832L_SCAN_COUNT 44
-
 static void mn12832l_encode_frame(
     const uint8_t *framebuffer,
     uint8_t output[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES]) {
   for (uint8_t scan = 0; scan < MN12832L_SCAN_COUNT; scan++) {
     mn12832l_encode_scan(framebuffer, scan, output[scan]);
   }
+}
+
+/* BLK is asserted throughout every SPI transfer and latch pulse. The output
+ * is enabled only for the bounded dwell interval following a valid transfer. */
+static esp_err_t mn12832l_spi_scan(
+    const uint8_t frame[MN12832L_FRAME_BYTES], bool illuminate) {
+  gpio_set_level(PIN_BLK, 1);
+  esp_err_t err = mn12832l_spi_shift(frame);
+  if (err != ESP_OK) {
+    return err;
+  }
+  gpio_set_level(PIN_LAT, 1);
+  esp_rom_delay_us(1);
+  gpio_set_level(PIN_LAT, 0);
+
+  if (illuminate) {
+    gpio_set_level(PIN_BLK, 0);
+    esp_rom_delay_us(250);
+    gpio_set_level(PIN_BLK, 1);
+  }
+  return ESP_OK;
+}
+
+esp_err_t mn12832l_spi_dry_run(const uint8_t *framebuffer) {
+  if (framebuffer == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+  mn12832l_encode_frame(framebuffer, scans);
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  int64_t start = esp_timer_get_time();
+  for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
+    err = mn12832l_spi_scan(scans[scan], false);
+    if (err != ESP_OK) {
+      break;
+    }
+  }
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L SPI dry run: %d scans, %lld us, status=%s\n",
+         MN12832L_SCAN_COUNT, (long long)(esp_timer_get_time() - start),
+         esp_err_to_name(err));
+  return err;
+}
+
+esp_err_t mn12832l_spi_illumination_test(const uint8_t *framebuffer) {
+  if (framebuffer == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+  mn12832l_encode_frame(framebuffer, scans);
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  // Bench-only, time-bounded test: do not run unattended. An independent
+  // hardware blanking watchdog will be needed for continuous operation.
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000)); // Verified filament warm-up time.
+  gpio_set_level(PIN_HV, 1);
+
+  const int max_cycles = 80;
+  int completed = 0;
+  int64_t start = esp_timer_get_time();
+  for (int cycle = 0; cycle < max_cycles; ++cycle) {
+    for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
+      err = mn12832l_spi_scan(scans[scan], true);
+      if (err != ESP_OK) {
+        goto shutdown;
+      }
+    }
+    ++completed;
+  }
+
+shutdown:
+  // Power-off is the only normal exit once HV has been enabled.
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  int64_t elapsed = esp_timer_get_time() - start;
+  printf("MN12832L SPI: %d/%d cycles in %lld us (~%.1f Hz), status=%s\n",
+         completed, max_cycles, (long long)elapsed,
+         elapsed > 0 ? (1000000.0 * completed / elapsed) : 0.0,
+         esp_err_to_name(err));
+  return err;
 }
 
 static void mn12832l_refresh_dry_run(

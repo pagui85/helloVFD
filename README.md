@@ -1,53 +1,50 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-H21 | ESP32-H4 | ESP32-P4 | ESP32-S2 | ESP32-S3 | Linux |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | --------- | -------- | -------- | -------- | -------- | ----- |
+# helloVFD — MN12832L on ESP32-S3
 
-# Hello World Example
+Experimental native ESP-IDF 6.0.2 driver for the Noritake MN12832L 128×32
+chip-in-glass vacuum fluorescent display. LVGL 9 produces an inverted I1
+framebuffer. The MN12832L component encodes 44 overlapping-grid scan frames.
 
-Starts a FreeRTOS task to print "Hello World".
+## Bench wiring
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+| ESP32-S3 GPIO | Adapter signal |
+| --- | --- |
+| 11 | SIN / SPI MOSI |
+| 12 | CLK / SPI SCLK |
+| 13 | SO1 (diagnostics only) |
+| 14 | SO2 (diagnostics only) |
+| 15 | BLK (HIGH = blanked) |
+| 16 | LAT |
+| 17 | HV enable |
+| 18 | EF filament enable |
 
-## How to use example
+Adapter power: 5 V and common ground. The tested board has an internal filament
+and high-voltage converter. **Verify the power-enable polarity on your own
+adapter** before attempting illumination; GPIO17/18 HIGH has been used in the
+bench experiments.
 
-Follow detailed instructions provided specifically for this example.
+## Current experiment
 
-Select the instructions depending on Espressif chip installed on your development board:
+`app_main()` renders `HELLO VFD!`, initializes the MN12832L GPIOs, runs a
+**blanked SPI dry run**, then a **time-bounded illumination test**. The latter
+warms the filament for two seconds before enabling HV, sends at most 80 whole
+scan cycles with 2 MHz SPI2, and finally sets BLK HIGH, HV LOW, and EF LOW.
+The serial console reports measured elapsed time and complete-refresh rate.
 
-- [ESP32 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/stable/get-started/index.html)
-- [ESP32-S2 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s2/get-started/index.html)
+This is **not a continuously safe display controller**. A CPU hang or loss of
+control while HV is applied needs an independent hardware blanking/interlock
+mechanism. Run the experiment attended with an accessible 5 V disconnect. Do
+not leave the experimental firmware powered unattended.
 
+The older bit-banged `mn12832l_shift_bits()` and readback tests are retained.
+They must be run **before** `mn12832l_spi_dry_run()` takes control of SIN/CLK.
+Neither transport changes the experimental grid/anode mapping, which still
+produces duplicate/adjacent physical columns in some positions.
 
-## Example folder contents
+Build/flash on the configured ESP-IDF 6.0.2 ESP32-S3 environment:
 
-The project **hello_world** contains one source file in C language [hello_world_main.c](main/hello_world_main.c). The file is located in folder [main](main).
-
-ESP-IDF projects are built using CMake. The project build configuration is contained in `CMakeLists.txt` files that provide set of directives and instructions describing the project's source files and targets (executable, library, or both).
-
-Below is short explanation of remaining files in the project folder.
-
+```sh
+idf.py build
+idf.py -p /dev/ttyACM0 flash monitor
 ```
-├── CMakeLists.txt
-├── pytest_hello_world.py      Python script used for automated testing
-├── main
-│   ├── CMakeLists.txt
-│   └── hello_world_main.c
-└── README.md                  This is the file you are currently reading
-```
 
-For more information on structure and contents of ESP-IDF projects, please refer to Section [Build System](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/build-system.html) of the ESP-IDF Programming Guide.
-
-## Troubleshooting
-
-* Program upload failure
-
-    * Hardware connection is not correct: run `idf.py -p PORT monitor`, and reboot your board to see if there are any output logs.
-    * The baud rate for downloading is too high: lower your baud rate in the `menuconfig` menu, and try again.
-
-## Technical support and feedback
-
-Please use the following feedback channels:
-
-* For technical queries, go to the [esp32.com](https://esp32.com/) forum
-* For a feature request or bug report, create a [GitHub issue](https://github.com/espressif/esp-idf/issues)
-
-We will get back to you as soon as possible.
+Board under test: ESP32-S3 N8R8 (8 MB quad flash, 8 MB octal PSRAM).

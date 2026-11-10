@@ -81,17 +81,11 @@ void app_main(void) {
   //   }
 
   ESP_ERROR_CHECK(mn12832l_init());
-  //   mn12832l_test_blank_polarity();
-  //   mn12832l_test_power();
-  //   mn12832l_test_illumination(frame);
-  mn12832l_test_sweep();
 
-  // mn12832l_test_illumination(test_frame);
-  //   ESP_ERROR_CHECK(mn12832l_run_diagnostic());
-  //   ESP_ERROR_CHECK(mn12832l_dry_run());
-  //   mn12832l_test_grid_encoder();
-  //   mn12832l_test_anode_encoder();
-  //   mn12832l_test_scan_encoder();
-  //   mn12832l_test_full_frame();
-  //   mn12832l_test_refresh(vfd_framebuffer_get());
+  // SPI owns the SIN/CLK pins after this point. Run any GPIO bit-bang
+  // diagnostics BEFORE the first SPI call, never concurrently with it.
+  ESP_ERROR_CHECK(mn12832l_spi_dry_run(frame));
+
+  // Short, supervised bench test; HV and filament are disabled on return.
+  ESP_ERROR_CHECK(mn12832l_spi_illumination_test(frame));
 }
