@@ -775,6 +775,152 @@ electrode_map_shutdown:
   return err;
 }
 
+/* Controlled brightness test for two independently verified physical columns:
+ * 10 = G4/D versus G5/D
+ * 12 = G4/F versus G5/F
+ *
+ * Only one grid and one anode per row are enabled. The active slot always
+ * receives exactly 250us of illumination; a selectable post-latch BLK guard
+ * (0, 20, or 200us) is applied while outputs are blanked.
+ * The other 43 SPI slots remain blank. This is NOT a continuous electrode hold.
+ * Use equal camera exposure when comparing brightness; measured frame rate is
+ * printed because increasing guard slightly affects overall refresh rate.
+ */
+esp_err_t mn12832l_spi_brightness_comparison_test(void) {
+  enum {
+    ROW_START = 9, ROW_END = 24,
+    DWELL_US = 250,
+    MAX_IDLE_US = 300000000,
+    MAX_ON_US = 900000000
+  };
+  static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
+  static uint8_t active[MN12832L_FRAME_BYTES];
+  static const uint32_t guard_us_values[] = {0, 20, 200};
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) return err;
+
+  int physical_column = 10;
+  int grid = 4;
+  int guard_index = 0;
+  uint32_t measured_frames = 0;
+  int64_t on_start, last_input, measurement_start;
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+
+  memset(active, 0, sizeof(active));
+  mn12832l_select_grid(active, (uint8_t)grid);
+  for (int row = ROW_START; row <= ROW_END; ++row) {
+    mn12832l_set_anode(active, (uint8_t)row, 'D');
+  }
+
+  printf("MN12832L brightness: physical 10 (D) or 12 (F)\n");
+  printf("Keys: 1=col10; 2=col12; l=G4; r=G5; g=cycle post-latch BLK guard; q=quit\n");
+  printf("Guards: 0, 20, 200us. Active dwell fixed at 250us.\n");
+  printf("Auto-off: 5min idle, 15min HV maximum.\n");
+  fflush(stdout);
+
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  on_start = esp_timer_get_time();
+  last_input = measurement_start = on_start;
+  printf("BRIGHTNESS COL %d G%d/%c, POST-LATCH GUARD %luus\n",
+         physical_column, grid, 'D',
+         (unsigned long)guard_us_values[guard_index]);
+  fflush(stdout);
+
+  for (;;) {
+    int64_t now = esp_timer_get_time();
+    if (now - on_start >= MAX_ON_US || now - last_input >= MAX_IDLE_US) {
+      err = ESP_ERR_TIMEOUT;
+      printf("Brightness comparison timed out; powering down.\n");
+      break;
+    }
+
+    for (int slot = 0; slot < MN12832L_SCAN_COUNT; ++slot) {
+      const bool selected = slot == grid - 1;
+      if (!selected) {
+        err = mn12832l_spi_scan_dwell(blank, false, 0);
+      } else {
+        /* Keep BLK asserted through SPI and latch, then optionally
+         * wait before enabling the 250us illumination pulse. */
+        gpio_set_level(PIN_BLK, 1);
+        err = mn12832l_spi_shift(active);
+        if (err != ESP_OK) goto brightness_shutdown;
+        gpio_set_level(PIN_LAT, 1);
+        esp_rom_delay_us(1);
+        gpio_set_level(PIN_LAT, 0);
+        if (guard_us_values[guard_index] > 0)
+          esp_rom_delay_us(guard_us_values[guard_index]);
+        gpio_set_level(PIN_BLK, 0);
+        esp_rom_delay_us(DWELL_US);
+        gpio_set_level(PIN_BLK, 1);
+      }
+      if (err != ESP_OK) goto brightness_shutdown;
+    }
+    vTaskDelay(1); /* Keep IDLE0 active: don't bypass the task watchdog. */
+
+    ++measured_frames;
+    int64_t measure_now = esp_timer_get_time();
+    if (measure_now - measurement_start >= 2000000) {
+      printf("COL %d G%d/%c GUARD %luus: %.2f frames/s\n",
+             physical_column, grid, physical_column == 10 ? 'D' : 'F',
+             (unsigned long)guard_us_values[guard_index],
+             (double)measured_frames * 1000000.0 /
+                 (double)(measure_now - measurement_start));
+      fflush(stdout);
+      measurement_start = measure_now;
+      measured_frames = 0;
+    }
+
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') {
+        printf("Quit requested.\n");
+        goto brightness_shutdown;
+      }
+      int new_column = physical_column;
+      int new_grid = grid;
+      int new_guard = guard_index;
+      if (key == '1') new_column = 10;
+      else if (key == '2') new_column = 12;
+      else if (key == 'l' || key == 'L') new_grid = 4;
+      else if (key == 'r' || key == 'R') new_grid = 5;
+      else if (key == 'g' || key == 'G') new_guard = (guard_index + 1) % 3;
+      else continue;
+
+      gpio_set_level(PIN_BLK, 1);
+      physical_column = new_column;
+      grid = new_grid;
+      guard_index = new_guard;
+      memset(active, 0, sizeof(active));
+      mn12832l_select_grid(active, (uint8_t)grid);
+      for (int row = ROW_START; row <= ROW_END; ++row)
+        mn12832l_set_anode(active, (uint8_t)row,
+                           physical_column == 10 ? 'D' : 'F');
+
+      last_input = esp_timer_get_time();
+      measurement_start = last_input;
+      measured_frames = 0;
+      printf("BRIGHTNESS COL %d G%d/%c, POST-LATCH GUARD %luus\n",
+             physical_column, grid, physical_column == 10 ? 'D' : 'F',
+             (unsigned long)guard_us_values[guard_index]);
+      fflush(stdout);
+      break;
+    }
+  }
+
+brightness_shutdown:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L brightness comparison ended: %s\n",
+         esp_err_to_name(err));
+  return err;
+}
+
 /* A/B/C/D grid-phase diagnostic. All modes do two SPI transfers per scan
  * with two 250us slots:
  * A = paired grids / blank
