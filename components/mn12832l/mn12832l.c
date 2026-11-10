@@ -1118,6 +1118,98 @@ first24_shutdown:
   return err;
 }
 
+/* Independence test for one measured three-column group.
+ * All displayed columns use their preferred independently measured grid:
+ * col4=G2/D, col5=G3/E, col6=G3/F. Anodes for columns 5 and 6
+ * coexist in a single G3 scan; col4 occupies the G2 scan.
+ * Hold timing and refresh slots constant across every pattern.
+ */
+esp_err_t mn12832l_spi_group_independence_test(void) {
+  enum { SLOT_US = 250, MAX_IDLE_US = 300000000,
+         MAX_ON_US = 900000000 };
+  static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
+  static uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+  static bool active_slots[MN12832L_SCAN_COUNT];
+  static const uint32_t patterns[] = {
+      1u << 3,                          /* 1: col 4 */
+      1u << 4,                          /* 2: col 5 */
+      1u << 5,                          /* 3: col 6 */
+      (1u << 3) | (1u << 4),            /* 4: 4+5 */
+      (1u << 4) | (1u << 5),            /* 5: 5+6 */
+      (1u << 3) | (1u << 5),            /* 6: 4+6 */
+      (1u << 3) | (1u << 4) | (1u << 5),/* 7: 4+5+6 */
+      0u                                /* 0: blank */
+  };
+  static const char *names[] = {
+      "4 only", "5 only", "6 only", "4+5", "5+6", "4+6",
+      "4+5+6", "blank"
+  };
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) return err;
+  int selected = 0;
+  int64_t on_start, last_input;
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  mn12832l_encode_first24_pattern(patterns[selected], scans, active_slots);
+  printf("MN12832L column independence: preferred G2/D, G3/E, G3/F\n");
+  printf("Numbered patterns: 1=4, 2=5, 3=6, 4=4+5, 5=5+6, 6=4+6, 7=4+5+6\n");
+  printf("0=off, q=quit. Start at #1. Report positions and stray lines.\n");
+  printf("Fixed 250us scan slot; auto-off 5min idle / 15min cumulative HV.\n");
+  fflush(stdout);
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  on_start = last_input = esp_timer_get_time();
+  printf("PATTERN #1: %s\n", names[selected]);
+  fflush(stdout);
+
+  for (;;) {
+    const int64_t now = esp_timer_get_time();
+    if (now - on_start >= MAX_ON_US || now - last_input >= MAX_IDLE_US) {
+      err = ESP_ERR_TIMEOUT;
+      printf("Independence test timeout; powering down.\n");
+      break;
+    }
+    for (int slot = 0; slot < MN12832L_SCAN_COUNT; ++slot) {
+      if (active_slots[slot]) {
+        err = mn12832l_spi_scan_dwell(scans[slot], true, SLOT_US);
+      } else {
+        err = mn12832l_spi_scan_dwell(blank, false, 0);
+        if (err == ESP_OK) esp_rom_delay_us(SLOT_US);
+      }
+      if (err != ESP_OK) goto group_independence_shutdown;
+    }
+    vTaskDelay(1);
+
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') {
+        printf("Quit requested.\n");
+        goto group_independence_shutdown;
+      }
+      int next;
+      if (key >= '1' && key <= '7') next = key - '1';
+      else if (key == '0') next = 7;
+      else continue;
+      gpio_set_level(PIN_BLK, 1);
+      selected = next;
+      mn12832l_encode_first24_pattern(patterns[selected], scans,
+                                       active_slots);
+      last_input = esp_timer_get_time();
+      printf("PATTERN #%c: %s\n", key, names[selected]);
+      fflush(stdout);
+      break;
+    }
+  }
+group_independence_shutdown:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L independence test ended: %s\n", esp_err_to_name(err));
+  return err;
+}
+
 /* Targeted absent-column check.
  *
  * For each requested physical column, use the same anode and compare the
