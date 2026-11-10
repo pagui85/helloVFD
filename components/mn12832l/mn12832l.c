@@ -799,7 +799,7 @@ esp_err_t mn12832l_spi_brightness_comparison_test(void) {
   esp_err_t err = mn12832l_spi_init();
   if (err != ESP_OK) return err;
 
-  int physical_column = 10;
+  int physical_column = 11;
   int grid = 4;
   int guard_index = 0;
   uint32_t measured_frames = 0;
@@ -812,11 +812,11 @@ esp_err_t mn12832l_spi_brightness_comparison_test(void) {
   memset(active, 0, sizeof(active));
   mn12832l_select_grid(active, (uint8_t)grid);
   for (int row = ROW_START; row <= ROW_END; ++row) {
-    mn12832l_set_anode(active, (uint8_t)row, 'D');
+    mn12832l_set_anode(active, (uint8_t)row, 'E');
   }
 
-  printf("MN12832L brightness: physical 10 (D) or 12 (F)\n");
-  printf("Keys: 1=col10; 2=col12; l=G4; r=G5; g=cycle post-latch BLK guard; q=quit\n");
+  printf("MN12832L brightness: physical 10 (D), 11 (E), 12 (F)\n");
+  printf("Keys: 1=col10; 2=col12; 3=col11; l=G4; r=G5; g=guard; q=quit\n");
   printf("Guards: 0, 20, 200us. Active dwell fixed at 250us.\n");
   printf("Auto-off: 5min idle, 15min HV maximum.\n");
   fflush(stdout);
@@ -827,7 +827,7 @@ esp_err_t mn12832l_spi_brightness_comparison_test(void) {
   on_start = esp_timer_get_time();
   last_input = measurement_start = on_start;
   printf("BRIGHTNESS COL %d G%d/%c, POST-LATCH GUARD %luus\n",
-         physical_column, grid, 'D',
+         physical_column, grid, 'E',
          (unsigned long)guard_us_values[guard_index]);
   fflush(stdout);
 
@@ -866,7 +866,7 @@ esp_err_t mn12832l_spi_brightness_comparison_test(void) {
     int64_t measure_now = esp_timer_get_time();
     if (measure_now - measurement_start >= 2000000) {
       printf("COL %d G%d/%c GUARD %luus: %.2f frames/s\n",
-             physical_column, grid, physical_column == 10 ? 'D' : 'F',
+             physical_column, grid, physical_column == 10 ? 'D' : (physical_column == 11 ? 'E' : 'F'),
              (unsigned long)guard_us_values[guard_index],
              (double)measured_frames * 1000000.0 /
                  (double)(measure_now - measurement_start));
@@ -886,6 +886,7 @@ esp_err_t mn12832l_spi_brightness_comparison_test(void) {
       int new_guard = guard_index;
       if (key == '1') new_column = 10;
       else if (key == '2') new_column = 12;
+      else if (key == '3') new_column = 11;
       else if (key == 'l' || key == 'L') new_grid = 4;
       else if (key == 'r' || key == 'R') new_grid = 5;
       else if (key == 'g' || key == 'G') new_guard = (guard_index + 1) % 3;
@@ -899,13 +900,13 @@ esp_err_t mn12832l_spi_brightness_comparison_test(void) {
       mn12832l_select_grid(active, (uint8_t)grid);
       for (int row = ROW_START; row <= ROW_END; ++row)
         mn12832l_set_anode(active, (uint8_t)row,
-                           physical_column == 10 ? 'D' : 'F');
+                           physical_column == 10 ? 'D' : (physical_column == 11 ? 'E' : 'F'));
 
       last_input = esp_timer_get_time();
       measurement_start = last_input;
       measured_frames = 0;
       printf("BRIGHTNESS COL %d G%d/%c, POST-LATCH GUARD %luus\n",
-             physical_column, grid, physical_column == 10 ? 'D' : 'F',
+             physical_column, grid, physical_column == 10 ? 'D' : (physical_column == 11 ? 'E' : 'F'),
              (unsigned long)guard_us_values[guard_index]);
       fflush(stdout);
       break;
