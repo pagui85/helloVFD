@@ -1264,8 +1264,8 @@ missing_columns_shutdown:
 /* Targeted absent-column check.
  *
  * For each requested physical column, use the same anode and compare the
- * two adjacent grids independently: 7=G3/A or G4/A,
- * 8=G3/B or G4/B, 9=G3/C or G4/C.
+ * two adjacent grids independently: 10=G4/D or G5/D,
+ * 11=G4/E or G5/E, 12=G4/F or G5/F.
  *
  * These are candidate physical addresses from the measured/inferred weave;
  * no grid preference is assumed. Keep one 250us active slot per 44-scan
@@ -1285,16 +1285,16 @@ esp_err_t mn12832l_spi_three_column_grid_test(void) {
     char anode;
   } candidate_t;
   static const candidate_t candidates[] = {
-      {7, 3, 4, 'A'},
-      {8, 3, 4, 'B'},
-      {9, 3, 4, 'C'}
+      {10, 4, 5, 'D'},
+      {11, 4, 5, 'E'},
+      {12, 4, 5, 'F'}
   };
   static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
   static uint8_t active[MN12832L_FRAME_BYTES];
   esp_err_t err = mn12832l_spi_init();
   if (err != ESP_OK) return err;
 
-  int selected = 0; /* Physical column 7. */
+  int selected = 0; /* Physical column 10. */
   bool use_right_grid = false;
   uint32_t frame_count = 0;
   int64_t on_start, last_input, measurement_start;
@@ -1309,7 +1309,7 @@ esp_err_t mn12832l_spi_three_column_grid_test(void) {
     mn12832l_set_anode(active, (uint8_t)row, candidates[selected].anode);
 
   printf("MN12832L three-column grid comparison (fixed 250us/slot)\n");
-  printf("1=col7 A, 2=col8 B, 3=col9 C; L=lower grid, R=higher grid; Q=quit\n");
+  printf("1=col10 D, 2=col11 E, 3=col12 F; L=lower grid, R=higher grid; Q=quit\n");
   printf("Only one grid is active per frame. Auto-off: 5min idle, 15min HV maximum.\n");
   fflush(stdout);
 
@@ -1318,7 +1318,7 @@ esp_err_t mn12832l_spi_three_column_grid_test(void) {
   gpio_set_level(PIN_HV, 1);
   on_start = esp_timer_get_time();
   last_input = measurement_start = on_start;
-  printf("TEST COL 7: G3/A (L); R selects G4/A\n");
+  printf("TEST COL 10: G4/D (L); R selects G5/D\n");
   fflush(stdout);
 
   for (;;) {
