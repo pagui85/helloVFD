@@ -656,7 +656,7 @@ static void mn12832l_manual_dump_transition(
  *
  * Controls: 1..9 select grids 1..9; n/p next/previous grid (1..12),
  * a..f select the named anode lane; q quits. Every valid input resets
- * the 30s inactivity timer. HV shuts down by 120s in all cases.
+ * the 5-minute inactivity timer. HV shuts down by 15 minutes regardless.
  * No grid is continuously energized while a command is inspected.
  */
 esp_err_t mn12832l_spi_electrode_map_test(void) {
@@ -664,8 +664,8 @@ esp_err_t mn12832l_spi_electrode_map_test(void) {
     FIRST_GRID = 1, LAST_GRID = 12,
     FIRST_ROW = 9, LAST_ROW = 24,
     DWELL_US = 250,
-    MAX_ON_US = 120000000,
-    MAX_IDLE_US = 30000000
+    MAX_ON_US = 900000000,
+    MAX_IDLE_US = 300000000
   };
   static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
   static uint8_t active[MN12832L_FRAME_BYTES];
@@ -690,7 +690,7 @@ esp_err_t mn12832l_spi_electrode_map_test(void) {
   printf("MN12832L physical electrode map: ONE grid, ONE anode/row\n");
   printf("1..9=grid; n/p=next/previous grid 1..12; a..f=anode; q=quit\n");
   printf("Map physical column number and brightness for each grid/anode.\n");
-  printf("250us dwell once per 44 slots; 30s idle, 120s HV maximum.\n");
+  printf("250us dwell once per 44 slots; 5min idle, 15min HV maximum.\n");
   fflush(stdout);
 
   gpio_set_level(PIN_EF, 1);
@@ -841,8 +841,8 @@ esp_err_t mn12832l_spi_single_column_ab_test(void) {
     LAST_COLUMN = 9,
     ROW_START = 8,
     ROW_END = 24,
-    MAX_ON_US = 120000000,
-    MAX_IDLE_US = 30000000
+    MAX_ON_US = 900000000,
+    MAX_IDLE_US = 300000000
   };
   esp_err_t err = mn12832l_spi_init();
   if (err != ESP_OK) {
@@ -874,7 +874,7 @@ esp_err_t mn12832l_spi_single_column_ab_test(void) {
   printf("Keys: 4..9=select only that column; n=next; p=previous; "
          "0=blank; a=paired; b=split; c=Gx; d=Gx+1; q=quit\n");
   printf("A=paired/blank, B=Gx/Gx+1, C=Gx/blank, D=Gx+1/blank.\n");
-  printf("Auto-off: 30s without command, 120s maximum HV-on.\n");
+  printf("Auto-off: 5min without command, 15min maximum HV-on.\n");
   fflush(stdout);
 
   gpio_set_level(PIN_EF, 1);
@@ -992,8 +992,8 @@ shutdown_single_ab:
 esp_err_t mn12832l_spi_overlap_pattern_test(void) {
   enum {
     ROW_START = 8, ROW_END = 24,
-    MAX_ON_US = 120000000,
-    MAX_IDLE_US = 30000000
+    MAX_ON_US = 900000000,
+    MAX_IDLE_US = 300000000
   };
   static const int logical_columns[3] = {8, 16, 24};
   static const uint8_t patterns[4] = {
@@ -1032,7 +1032,7 @@ esp_err_t mn12832l_spi_overlap_pattern_test(void) {
   printf("MN12832L four-pattern test, Y=8..23\n");
   printf("1=8; 2=16; 3=8+16; 4=8+16+24; SPACE/N=next; P=previous\n");
   printf("A=paired; B=sequential; C=previous grid; D=next grid; Q=quit\n");
-  printf("30s inactivity / 120s total HV-on timeout.\n");
+  printf("5min inactivity / 15min total HV-on timeout.\n");
   fflush(stdout);
 
   gpio_set_level(PIN_EF, 1);
@@ -1142,8 +1142,8 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
     WIDTH = 16,
     STRIP_Y_START = 8,
     STRIP_Y_END = 24,
-    MAX_ON_US = 120000000,
-    MAX_IDLE_US = 30000000
+    MAX_ON_US = 900000000,
+    MAX_IDLE_US = 300000000
   };
   esp_err_t err = mn12832l_spi_init();
   if (err != ESP_OK) {
