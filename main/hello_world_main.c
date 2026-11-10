@@ -87,7 +87,8 @@ void app_main(void) {
   ESP_ERROR_CHECK(mn12832l_spi_dry_run(frame));
 
   // Supervised bounded diagnostic: grow then erase a 16-row vertical bar.
-  ESP_ERROR_CHECK(mn12832l_spi_cumulative_fill_test());
+  ESP_ERROR_CHECK(mn12832l_spi_manual_fill_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_cumulative_fill_test());
   // ESP_ERROR_CHECK(mn12832l_spi_grid_pair_test());
   // ESP_ERROR_CHECK(mn12832l_spi_anode_walk());
   // ESP_ERROR_CHECK(mn12832l_spi_phase_shift_test(frame));
