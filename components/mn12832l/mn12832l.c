@@ -706,6 +706,157 @@ static esp_err_t mn12832l_manual_timed_scan(
   return mn12832l_spi_scan_dwell(isolated, true, PHASE_US);
 }
 
+/* Independent single-column A/B comparison for logical columns 4..9.
+ * Numeric keys 4..9 select ONLY that column (1-based); n/p walk the range,
+ * 0 blanks the pattern; a/b toggle paired vs individually driven grids.
+ *
+ * Keep the current mapping/scan driver unchanged, so this isolates the
+ * influence of one logical-column request without cumulative interactions.
+ * Always multiplex full frames and automatically shut off after timeouts.
+ */
+esp_err_t mn12832l_spi_single_column_ab_test(void) {
+  enum {
+    FIRST_COLUMN = 4,
+    LAST_COLUMN = 9,
+    ROW_START = 8,
+    ROW_END = 24,
+    MAX_ON_US = 120000000,
+    MAX_IDLE_US = 30000000
+  };
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  /* Keep diagnostic data off the relatively small app_main task stack. */
+  static uint8_t framebuffer[128 * 32 / 8];
+  static uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+  int selected_column = FIRST_COLUMN; // One-based human-readable column.
+  bool split_grids = false;
+  uint32_t measured_frames = 0;
+  int64_t measurement_start = 0;
+  int64_t on_start = 0;
+  int64_t last_input = 0;
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+
+  memset(framebuffer, 0xFF, sizeof(framebuffer));
+  for (int y = ROW_START; y < ROW_END; ++y) {
+    int x = selected_column - 1;
+    framebuffer[y * 16 + x / 8] &= (uint8_t)~(0x80u >> (x % 8));
+  }
+  mn12832l_encode_frame(framebuffer, scans);
+
+  printf("MN12832L single-column A/B: columns 4..9, Y=8..23\n");
+  printf("Keys: 4..9=select only that column; n=next; p=previous; "
+         "0=blank; a=paired; b=split; q=quit\n");
+  printf("A: paired 250us + blank 250us, B: Gx then Gx+1 250us each.\n");
+  printf("Auto-off: 30s without command, 120s maximum HV-on.\n");
+  fflush(stdout);
+
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  on_start = esp_timer_get_time();
+  last_input = on_start;
+  measurement_start = on_start;
+  printf("SELECTED COLUMN %d ONLY, MODE A\n", selected_column);
+  fflush(stdout);
+
+  for (;;) {
+    int64_t now = esp_timer_get_time();
+    if (now - on_start >= MAX_ON_US || now - last_input >= MAX_IDLE_US) {
+      err = ESP_ERR_TIMEOUT;
+      printf("Single-column test timed out, shutting down.\n");
+      break;
+    }
+
+    for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
+      err = mn12832l_manual_timed_scan(scans[scan], scan, split_grids);
+      if (err != ESP_OK) {
+        goto shutdown_single_ab;
+      }
+    }
+    /* Give IDLE0 an opportunity to run; do not mask the watchdog. */
+    vTaskDelay(1);
+
+    ++measured_frames;
+    int64_t measure_now = esp_timer_get_time();
+    if (measure_now - measurement_start >= 2000000) {
+      printf("REFRESH MODE %c COLUMN %d: %.2f frames/s\n",
+             split_grids ? 'B' : 'A', selected_column,
+             (double)measured_frames * 1000000.0 /
+                 (double)(measure_now - measurement_start));
+      fflush(stdout);
+      measured_frames = 0;
+      measurement_start = measure_now;
+    }
+
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') {
+        printf("Quit requested.\n");
+        goto shutdown_single_ab;
+      }
+      if (key == 'a' || key == 'A' || key == 'b' || key == 'B') {
+        split_grids = (key == 'b' || key == 'B');
+        last_input = esp_timer_get_time();
+        measurement_start = last_input;
+        measured_frames = 0;
+        gpio_set_level(PIN_BLK, 1);
+        printf("MODE %c, COLUMN %d ONLY\n",
+               split_grids ? 'B' : 'A', selected_column);
+        fflush(stdout);
+        break;
+      }
+
+      int next_column = selected_column;
+      if (key >= '4' && key <= '9') {
+        next_column = key - '0';
+      } else if (key == 'n' || key == 'N' || key == ' ') {
+        next_column = selected_column == LAST_COLUMN
+                          ? FIRST_COLUMN
+                          : (selected_column == 0 ? FIRST_COLUMN
+                                                  : selected_column + 1);
+      } else if (key == 'p' || key == 'P') {
+        next_column = selected_column <= FIRST_COLUMN
+                          ? LAST_COLUMN
+                          : selected_column - 1;
+      } else if (key == '0') {
+        next_column = 0; // All columns off.
+      } else {
+        continue;
+      }
+      last_input = esp_timer_get_time();
+      selected_column = next_column;
+      gpio_set_level(PIN_BLK, 1);
+      memset(framebuffer, 0xFF, sizeof(framebuffer));
+      if (selected_column != 0) {
+        int x = selected_column - 1;
+        for (int y = ROW_START; y < ROW_END; ++y) {
+          framebuffer[y * 16 + x / 8] &=
+              (uint8_t)~(0x80u >> (x % 8));
+        }
+      }
+      mn12832l_encode_frame(framebuffer, scans);
+      printf("SELECTED COLUMN %d ONLY, MODE %c; x=%d\n",
+             selected_column, split_grids ? 'B' : 'A',
+             selected_column == 0 ? -1 : selected_column - 1);
+      fflush(stdout);
+      break;
+    }
+  }
+
+shutdown_single_ab:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L single-column A/B complete: %s\n", esp_err_to_name(err));
+  return err;
+}
+
 /* Manual 16-column cumulative fill for frame-by-frame observations.
  * Send a space through the primary ESP-IDF serial console to add a column;
  * 'q' exits. The displayed frame is continuously multiplexed even while
