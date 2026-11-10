@@ -319,6 +319,54 @@ shutdown_walk:
   return err;
 }
 
+/* Independent grid test: one grid bit and only anode A for rows 8..23.
+ * Every other multiplex slot remains blank, preserving the low scan duty.
+ * This bypasses both overlapping-grid and ABC/DEF encoder assumptions. */
+esp_err_t mn12832l_spi_grid_walk(void) {
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  enum { WALK_GRIDS = 12, WALK_HOLD_US = 650000 };
+  uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+
+  printf("MN12832L grid isolation: grids 1..12, anode A, rows 8..23\n");
+  for (int grid = 1; grid <= WALK_GRIDS; ++grid) {
+    memset(scans, 0, sizeof(scans));
+    uint8_t *active = scans[grid - 1];
+    mn12832l_select_grid(active, grid);
+    for (int row = 9; row <= 24; ++row) {
+      mn12832l_set_anode(active, row, 'A');
+    }
+
+    printf("GRID %02d (step %d/%d)\n", grid, grid, WALK_GRIDS);
+    fflush(stdout);
+    int64_t deadline = esp_timer_get_time() + WALK_HOLD_US;
+    do {
+      for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
+        err = mn12832l_spi_scan(scans[scan], scan == grid - 1);
+        if (err != ESP_OK) {
+          goto shutdown_grid_walk;
+        }
+      }
+    } while (esp_timer_get_time() < deadline);
+  }
+
+shutdown_grid_walk:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L grid isolation finished: %s\n", esp_err_to_name(err));
+  return err;
+}
+
 static void mn12832l_refresh_dry_run(
     uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES]) {
   // Keep the display safely disabled.

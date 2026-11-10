@@ -86,8 +86,8 @@ void app_main(void) {
   // diagnostics BEFORE the first SPI call, never concurrently with it.
   ESP_ERROR_CHECK(mn12832l_spi_dry_run(frame));
 
-  // Short, supervised X=0..17 column-mapping test. The original text test
-  // remains available once we've established the physical column order.
-  ESP_ERROR_CHECK(mn12832l_spi_column_walk());
+  // Isolate physical grid selection with only anode A (rows 8..23).
+  ESP_ERROR_CHECK(mn12832l_spi_grid_walk());
+  // ESP_ERROR_CHECK(mn12832l_spi_column_walk());
   // ESP_ERROR_CHECK(mn12832l_spi_illumination_test(frame));
 }

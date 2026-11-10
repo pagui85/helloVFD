@@ -19,3 +19,4 @@ void mn12832l_test_sweep(void);
 esp_err_t mn12832l_spi_dry_run(const uint8_t *framebuffer);
 esp_err_t mn12832l_spi_illumination_test(const uint8_t *framebuffer);
 esp_err_t mn12832l_spi_column_walk(void);
+esp_err_t mn12832l_spi_grid_walk(void);
