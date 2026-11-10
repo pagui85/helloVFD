@@ -29,3 +29,4 @@ esp_err_t mn12832l_spi_single_column_ab_test(void);
 esp_err_t mn12832l_spi_overlap_pattern_test(void);
 esp_err_t mn12832l_spi_electrode_map_test(void);
 esp_err_t mn12832l_spi_brightness_comparison_test(void);
+esp_err_t mn12832l_spi_first24_corrected_test(void);
