@@ -86,7 +86,7 @@ void app_main(void) {
   // diagnostics BEFORE the first SPI call, never concurrently with it.
   ESP_ERROR_CHECK(mn12832l_spi_dry_run(frame));
 
-  // Isolate the contribution of G4 and G5 to the A/B double lines.
+  // Complete the same G4/G5 isolation experiment for anodes C through F.
   ESP_ERROR_CHECK(mn12832l_spi_grid_pair_test());
   // ESP_ERROR_CHECK(mn12832l_spi_anode_walk());
   // ESP_ERROR_CHECK(mn12832l_spi_phase_shift_test(frame));

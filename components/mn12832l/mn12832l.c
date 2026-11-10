@@ -441,8 +441,8 @@ shutdown_anode_walk:
   return err;
 }
 
-/* Identify which neighboring grid produces each physical line while the
- * selected anode stays fixed. Six states: A/B x G4/G5/G4+G5. */
+/* Complete the neighboring-grid mapping for C..F. A/B were measured in
+ * the previous experiment and can be retested by restoring that version. */
 esp_err_t mn12832l_spi_grid_pair_test(void) {
   esp_err_t err = mn12832l_spi_init();
   if (err != ESP_OK) {
@@ -450,7 +450,7 @@ esp_err_t mn12832l_spi_grid_pair_test(void) {
   }
 
   enum { TEST_SCAN = 4, HOLD_US = 850000 };
-  const char anodes[] = {'A', 'B'};
+  const char anodes[] = {'C', 'D', 'E', 'F'};
   const char *grid_names[] = {"G4 only", "G5 only", "G4+G5"};
   uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
 
@@ -460,8 +460,8 @@ esp_err_t mn12832l_spi_grid_pair_test(void) {
   vTaskDelay(pdMS_TO_TICKS(2000));
   gpio_set_level(PIN_HV, 1);
 
-  printf("MN12832L grid pair isolation: anodes A/B, grids 4 and 5\n");
-  for (int anode = 0; anode < 2; ++anode) {
+  printf("MN12832L grid pair isolation: anodes C/D/E/F, grids 4 and 5\n");
+  for (int anode = 0; anode < 4; ++anode) {
     for (int selected = 0; selected < 3; ++selected) {
       gpio_set_level(PIN_BLK, 1);
       vTaskDelay(pdMS_TO_TICKS(150));
@@ -478,7 +478,7 @@ esp_err_t mn12832l_spi_grid_pair_test(void) {
         mn12832l_set_anode(active, row, anodes[anode]);
       }
 
-      printf("ANODE %c / %s (step %d/6)\n", anodes[anode],
+      printf("ANODE %c / %s (step %d/12)\n", anodes[anode],
              grid_names[selected], anode * 3 + selected + 1);
       fflush(stdout);
       int64_t deadline = esp_timer_get_time() + HOLD_US;
