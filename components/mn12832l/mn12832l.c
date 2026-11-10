@@ -944,9 +944,9 @@ static const mn12832l_physical_column_t mn12832l_first24_map[24] = {
     {3, 'A'}, {4, 'B'}, {4, 'C'}, /* 7..9, G4 C unverified */
     {4, 'D'}, {5, 'E'}, {5, 'F'}, /* 10..12, preferred grids measured */
     {5, 'A'}, {5, 'B'}, {6, 'C'}, /* 13..15, G6 C unverified */
-    {6, 'D'}, {6, 'E'}, {6, 'F'}, /* 16..18, E/F provisional */
-    {7, 'A'}, {7, 'B'}, {7, 'C'}, /* 19..21, inferred */
-    {8, 'D'}, {8, 'E'}, {8, 'F'}  /* 22..24, inferred */
+    {6, 'D'}, {6, 'E'}, {7, 'F'}, /* 16..18, G7/F verified bright */
+    {7, 'A'}, {7, 'B'}, {8, 'C'}, /* 19..21, G8/C verified bright */
+    {8, 'D'}, {8, 'E'}, {9, 'F'}  /* 22..24, G9/F verified bright */
 };
 
 /* Build a 16-row stripe for requested columns, using raw electrode bits,
