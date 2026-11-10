@@ -1261,6 +1261,149 @@ missing_columns_shutdown:
   return err;
 }
 
+/* Targeted absent-column check.
+ *
+ * For each requested physical column, use the same anode and compare the
+ * two adjacent grids independently: 4=G2/D or G3/D,
+ * 5=G2/E or G3/E, 6=G2/F or G3/F.
+ *
+ * These are candidate physical addresses from the measured/inferred weave;
+ * no grid preference is assumed. Keep one 250us active slot per 44-scan
+ * frame, regardless of grid, with other slots fully blank and time-matched.
+ * No continuous-on electrode drive. No encoder mapping changed here.
+ */
+esp_err_t mn12832l_spi_three_column_grid_test(void) {
+  enum {
+    SLOT_US = 250,
+    MAX_IDLE_US = 300000000,
+    MAX_ON_US = 900000000
+  };
+  typedef struct {
+    uint8_t column;
+    uint8_t left_grid;
+    uint8_t right_grid;
+    char anode;
+  } candidate_t;
+  static const candidate_t candidates[] = {
+      {4, 2, 3, 'D'},
+      {5, 2, 3, 'E'},
+      {6, 2, 3, 'F'}
+  };
+  static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
+  static uint8_t active[MN12832L_FRAME_BYTES];
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) return err;
+
+  int selected = 0; /* Physical column 4. */
+  bool use_right_grid = false;
+  uint32_t frame_count = 0;
+  int64_t on_start, last_input, measurement_start;
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+
+  memset(active, 0, sizeof(active));
+  mn12832l_select_grid(active, candidates[selected].left_grid);
+  for (int row = 9; row <= 24; ++row)
+    mn12832l_set_anode(active, (uint8_t)row, candidates[selected].anode);
+
+  printf("MN12832L three-column grid comparison (fixed 250us/slot)\n");
+  printf("1=col4 D, 2=col5 E, 3=col6 F; L=lower grid, R=higher grid; Q=quit\n");
+  printf("Only one grid is active per frame. Auto-off: 5min idle, 15min HV maximum.\n");
+  fflush(stdout);
+
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  on_start = esp_timer_get_time();
+  last_input = measurement_start = on_start;
+  printf("TEST COL 4: G2/D (L); R selects G3/D\n");
+  fflush(stdout);
+
+  for (;;) {
+    const int64_t now = esp_timer_get_time();
+    if (now - on_start >= MAX_ON_US || now - last_input >= MAX_IDLE_US) {
+      err = ESP_ERR_TIMEOUT;
+      printf("Three-column test timeout; powering down.\n");
+      break;
+    }
+
+    const candidate_t *candidate = &candidates[selected];
+    const int grid = use_right_grid ? candidate->right_grid
+                                    : candidate->left_grid;
+    for (int slot = 0; slot < MN12832L_SCAN_COUNT; ++slot) {
+      bool active_slot = slot == grid - 1;
+      if (active_slot) {
+        err = mn12832l_spi_scan_dwell(active, true, SLOT_US);
+      } else {
+        err = mn12832l_spi_scan_dwell(blank, false, 0);
+        if (err == ESP_OK) esp_rom_delay_us(SLOT_US);
+      }
+      if (err != ESP_OK) goto three_column_grid_shutdown;
+    }
+    vTaskDelay(1); /* Allow IDLE0; preserve task watchdog. */
+
+    ++frame_count;
+    const int64_t measured_now = esp_timer_get_time();
+    if (measured_now - measurement_start >= 2000000) {
+      printf("COL %u G%d/%c (%c): %.2f frames/s\n",
+             (unsigned)candidate->column, grid, candidate->anode,
+             use_right_grid ? 'R' : 'L',
+             (double)frame_count * 1000000.0 /
+                 (double)(measured_now - measurement_start));
+      fflush(stdout);
+      frame_count = 0;
+      measurement_start = measured_now;
+    }
+
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') {
+        printf("Quit requested.\n");
+        goto three_column_grid_shutdown;
+      }
+      if (key >= '1' && key <= '3') {
+        selected = key - '1';
+      } else if (key == 'l' || key == 'L') {
+        use_right_grid = false;
+      } else if (key == 'r' || key == 'R') {
+        use_right_grid = true;
+      } else {
+        continue;
+      }
+
+      gpio_set_level(PIN_BLK, 1);
+      candidate = &candidates[selected];
+      const uint8_t selected_grid = use_right_grid
+          ? candidate->right_grid : candidate->left_grid;
+      memset(active, 0, sizeof(active));
+      mn12832l_select_grid(active, selected_grid);
+      for (int row = 9; row <= 24; ++row)
+        mn12832l_set_anode(active, (uint8_t)row, candidate->anode);
+
+      last_input = esp_timer_get_time();
+      frame_count = 0;
+      measurement_start = last_input;
+      printf("TEST COL %u G%u/%c (%c), alternate G%u\n",
+             (unsigned)candidate->column, (unsigned)selected_grid,
+             candidate->anode, use_right_grid ? 'R' : 'L',
+             (unsigned)(use_right_grid ? candidate->left_grid
+                                       : candidate->right_grid));
+      fflush(stdout);
+      break;
+    }
+  }
+
+three_column_grid_shutdown:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L three-column comparison ended: %s\n",
+         esp_err_to_name(err));
+  return err;
+}
+
 /* A/B/C/D grid-phase diagnostic. All modes do two SPI transfers per scan
  * with two 250us slots:
  * A = paired grids / blank
