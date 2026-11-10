@@ -388,6 +388,59 @@ shutdown_grid_walk:
   return err;
 }
 
+/* A..F at a fixed adjacent grid pair. One anode per row, one illuminated
+ * scan per multiplex cycle: keep this a short supervised diagnostic. */
+esp_err_t mn12832l_spi_anode_walk(void) {
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  enum { TEST_SCAN = 4, WALK_HOLD_US = 800000 };
+  const char anodes[] = {'A', 'B', 'C', 'D', 'E', 'F'};
+  uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+
+  printf("MN12832L anode isolation: fixed grids 4+5, rows 9..24\n");
+  for (int lane = 0; lane < 6; ++lane) {
+    // Visible gap between steps to distinguish successive anodes.
+    gpio_set_level(PIN_BLK, 1);
+    vTaskDelay(pdMS_TO_TICKS(150));
+
+    memset(scans, 0, sizeof(scans));
+    uint8_t *active = scans[TEST_SCAN];
+    mn12832l_select_grid(active, TEST_SCAN);
+    mn12832l_select_grid(active, TEST_SCAN + 1);
+    for (int row = 9; row <= 24; ++row) {
+      mn12832l_set_anode(active, row, anodes[lane]);
+    }
+
+    printf("ANODE %c (step %d/6)\n", anodes[lane], lane + 1);
+    fflush(stdout);
+    int64_t deadline = esp_timer_get_time() + WALK_HOLD_US;
+    do {
+      for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
+        err = mn12832l_spi_scan(scans[scan], scan == TEST_SCAN);
+        if (err != ESP_OK) {
+          goto shutdown_anode_walk;
+        }
+      }
+    } while (esp_timer_get_time() < deadline);
+  }
+
+shutdown_anode_walk:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L anode isolation finished: %s\n", esp_err_to_name(err));
+  return err;
+}
+
 static void mn12832l_refresh_dry_run(
     uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES]) {
   // Keep the display safely disabled.

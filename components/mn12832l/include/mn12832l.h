@@ -21,3 +21,4 @@ esp_err_t mn12832l_spi_illumination_test(const uint8_t *framebuffer);
 esp_err_t mn12832l_spi_phase_shift_test(const uint8_t *framebuffer);
 esp_err_t mn12832l_spi_column_walk(void);
 esp_err_t mn12832l_spi_grid_walk(void);
+esp_err_t mn12832l_spi_anode_walk(void);
