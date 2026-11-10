@@ -1118,6 +1118,130 @@ first24_shutdown:
   return err;
 }
 
+/* Pixel-coordinate diagnostic: verify row ordering, single-pixel isolation,
+ * and asymmetric shapes on independently validated columns 4,5,6.
+ *
+ * All coordinates are 1-based and express physical row-electrode positions.
+ * The physical top/bottom orientation remains to be established by observation.
+ * Do not use the historical overlapping-pair framebuffer encoder.
+ */
+typedef struct {
+  uint8_t x;
+  uint8_t row;
+} mn12832l_test_pixel_t;
+
+static void mn12832l_encode_test_pixels(
+    const mn12832l_test_pixel_t *pixels, size_t count,
+    uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES],
+    bool active_slots[MN12832L_SCAN_COUNT]) {
+  memset(scans, 0, MN12832L_SCAN_COUNT * MN12832L_FRAME_BYTES);
+  memset(active_slots, 0, MN12832L_SCAN_COUNT * sizeof(active_slots[0]));
+  for (size_t i = 0; i < count; ++i) {
+    const mn12832l_test_pixel_t p = pixels[i];
+    if (p.x < 1 || p.x > 24 || p.row < 1 || p.row > 32) continue;
+    const mn12832l_physical_column_t *m = &mn12832l_first24_map[p.x - 1];
+    const int slot = m->grid - 1;
+    mn12832l_select_grid(scans[slot], m->grid);
+    mn12832l_set_anode(scans[slot], p.row, m->anode);
+    active_slots[slot] = true;
+  }
+}
+
+esp_err_t mn12832l_spi_pixel_coordinates_test(void) {
+  enum { SLOT_US = 250, MAX_IDLE_US = 300000000,
+         MAX_ON_US = 900000000 };
+  static const mn12832l_test_pixel_t patterns[][5] = {
+      {{5, 10}},                                      /* 1 */
+      {{5, 11}},                                      /* 2 */
+      {{5, 12}},                                      /* 3 */
+      {{4, 11}},                                      /* 4 */
+      {{6, 11}},                                      /* 5 */
+      {{4, 10}, {5, 11}, {6, 12}},                    /* 6 diagonal */
+      {{4, 10}, {4, 11}, {4, 12}, {5, 12}, {6, 12}},/* 7 L */
+      {{4, 10}, {6, 10}, {4, 12}, {6, 12}}           /* 8 corners */
+  };
+  static const uint8_t counts[] = {1, 1, 1, 1, 1, 3, 5, 4};
+  static const char *descriptions[] = {
+      "single (5,10)", "single (5,11)", "single (5,12)",
+      "single (4,11)", "single (6,11)",
+      "diagonal (4,10)+(5,11)+(6,12)",
+      "L shape (4,10)+(4,11)+(4,12)+(5,12)+(6,12)",
+      "four corners (4,10)+(6,10)+(4,12)+(6,12)"
+  };
+  static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
+  static uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+  static bool active_slots[MN12832L_SCAN_COUNT];
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) return err;
+  int selected = 0;
+  int64_t on_start, last_input;
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  mn12832l_encode_test_pixels(patterns[0], counts[0], scans, active_slots);
+  printf("MN12832L PIXEL COORDINATES: physical X=4..6, row electrodes 10..12\n");
+  printf("Numbered tests 1..8: 1=(5,10) 2=(5,11) 3=(5,12) 4=(4,11) 5=(6,11)\n");
+  printf("6=diagonal 7=L shape 8=four corners; 0=blank q=quit\n");
+  printf("Row direction is NOT assumed; report movement, positions, duplicates.\n");
+  printf("Fixed 250us/scan, single active grid per slot; 5min idle / 15min HV maximum.\n");
+  fflush(stdout);
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  on_start = last_input = esp_timer_get_time();
+  printf("TEST #1: %s\n", descriptions[0]);
+  fflush(stdout);
+
+  for (;;) {
+    int64_t now = esp_timer_get_time();
+    if (now - on_start >= MAX_ON_US || now - last_input >= MAX_IDLE_US) {
+      err = ESP_ERR_TIMEOUT;
+      printf("Pixel-coordinate test timeout; powering down.\n");
+      break;
+    }
+    for (int slot = 0; slot < MN12832L_SCAN_COUNT; ++slot) {
+      if (active_slots[slot]) {
+        err = mn12832l_spi_scan_dwell(scans[slot], true, SLOT_US);
+      } else {
+        err = mn12832l_spi_scan_dwell(blank, false, 0);
+        if (err == ESP_OK) esp_rom_delay_us(SLOT_US);
+      }
+      if (err != ESP_OK) goto pixel_coordinates_shutdown;
+    }
+    vTaskDelay(1);
+
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') {
+        printf("Quit requested.\n");
+        goto pixel_coordinates_shutdown;
+      }
+      if (key == '0') {
+        gpio_set_level(PIN_BLK, 1);
+        mn12832l_encode_test_pixels(NULL, 0, scans, active_slots);
+        printf("TEST #0: blank\n");
+      } else if (key >= '1' && key <= '8') {
+        selected = key - '1';
+        gpio_set_level(PIN_BLK, 1);
+        mn12832l_encode_test_pixels(patterns[selected], counts[selected],
+                                    scans, active_slots);
+        printf("TEST #%c: %s\n", key, descriptions[selected]);
+      } else {
+        continue;
+      }
+      last_input = esp_timer_get_time();
+      fflush(stdout);
+      break;
+    }
+  }
+pixel_coordinates_shutdown:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L pixel-coordinate test ended: %s\n", esp_err_to_name(err));
+  return err;
+}
+
 /* Independence test for one measured three-column group.
  * All displayed columns use their preferred independently measured grid:
  * col4=G2/D, col5=G3/E, col6=G3/F. Anodes for columns 5 and 6
