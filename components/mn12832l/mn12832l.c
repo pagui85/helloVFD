@@ -921,6 +921,187 @@ brightness_shutdown:
   return err;
 }
 
+/* EXPERIMENTAL first-24-column single-grid renderer.
+ *
+ * The map is 1-based and deliberately explicit. Mapping was measured for
+ * several entries and inferred by the repeating three-column pattern for
+ * others. Selection favors the BRIGHTER measured grid when known; columns
+ * without a measured brightness preference are provisional.
+ *
+ * Each logical pixel is assigned to only one grid/anode electrode. Frames
+ * for other grids are fully blank. No pair of grids is ever active together.
+ * The existing mn12832l_encode_frame() remains untouched for comparison.
+ */
+typedef struct {
+  uint8_t grid;
+  char anode;
+} mn12832l_physical_column_t;
+
+static const mn12832l_physical_column_t mn12832l_first24_map[24] = {
+    {2, 'A'}, {2, 'B'}, {2, 'C'}, /* 1..3, G2 measured */
+    {2, 'D'}, {3, 'E'}, {3, 'F'}, /* 4..6, G3 E/F stronger */
+    {3, 'A'}, {4, 'B'}, {4, 'C'}, /* 7..9, G4 C unverified */
+    {4, 'D'}, {4, 'E'}, {5, 'F'}, /* 10..12, strongest measured */
+    {5, 'A'}, {5, 'B'}, {6, 'C'}, /* 13..15, G6 C unverified */
+    {6, 'D'}, {6, 'E'}, {6, 'F'}, /* 16..18, E/F provisional */
+    {7, 'A'}, {7, 'B'}, {7, 'C'}, /* 19..21, inferred */
+    {8, 'D'}, {8, 'E'}, {8, 'F'}  /* 22..24, inferred */
+};
+
+/* Build a 16-row stripe for requested columns, using raw electrode bits,
+ * not the old logical x/3 and ABC/DEF alternating encoder. */
+static void mn12832l_encode_first24_pattern(
+    uint32_t column_mask,
+    uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES],
+    bool active_slots[MN12832L_SCAN_COUNT]) {
+  memset(scans, 0,
+         MN12832L_SCAN_COUNT * MN12832L_FRAME_BYTES);
+  memset(active_slots, 0, MN12832L_SCAN_COUNT * sizeof(active_slots[0]));
+
+  for (int x = 0; x < 24; ++x) {
+    if ((column_mask & (1u << x)) == 0) continue;
+    const mn12832l_physical_column_t *mapping = &mn12832l_first24_map[x];
+    const int slot = mapping->grid - 1;
+    uint8_t *scan = scans[slot];
+    mn12832l_select_grid(scan, mapping->grid);
+    active_slots[slot] = true;
+    for (int row = 9; row <= 24; ++row)
+      mn12832l_set_anode(scan, (uint8_t)row, mapping->anode);
+  }
+}
+
+esp_err_t mn12832l_spi_first24_corrected_test(void) {
+  enum {
+    SLOT_US = 250,
+    MAX_IDLE_US = 300000000,
+    MAX_ON_US = 900000000
+  };
+  static uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+  static bool active_slots[MN12832L_SCAN_COUNT];
+  static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
+  static const uint32_t masks[5] = {
+      0x00ffffffu, /* 1: all columns 1..24 */
+      0x00555555u, /* 2: odd columns */
+      0x00aaaaaau, /* 3: even columns */
+      (1u << 7) | (1u << 15) | (1u << 23), /* 4: 8,16,24 */
+      0u /* 5: individually selected column */
+  };
+  static const char *pattern_names[5] = {
+      "ALL 1..24", "ODD", "EVEN", "8,16,24", "SINGLE"
+  };
+
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) return err;
+  int pattern = 0;
+  int single_col = 1;
+  uint32_t measured_frames = 0;
+  int64_t on_start, last_input, measurement_start;
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  mn12832l_encode_first24_pattern(masks[0], scans, active_slots);
+
+  printf("MN12832L EXPERIMENTAL single-grid encoder, physical columns 1..24\n");
+  printf("Keys: 1=all, 2=odd, 3=even, 4=8+16+24, 5=single; n/p=step single; 0=off; q=quit\n");
+  printf("Provisional map in firmware; 250us per scan slot; 5min idle/15min HV maximum\n");
+  fflush(stdout);
+
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  on_start = esp_timer_get_time();
+  last_input = measurement_start = on_start;
+  printf("PATTERN 1: ALL 1..24\n");
+  fflush(stdout);
+
+  for (;;) {
+    int64_t now = esp_timer_get_time();
+    if (now - on_start >= MAX_ON_US || now - last_input >= MAX_IDLE_US) {
+      err = ESP_ERR_TIMEOUT;
+      printf("First-24 experiment timed out; powering down.\n");
+      break;
+    }
+
+    for (int slot = 0; slot < MN12832L_SCAN_COUNT; ++slot) {
+      /* Constant slot duration regardless of pattern density. */
+      if (active_slots[slot]) {
+        err = mn12832l_spi_scan_dwell(scans[slot], true, SLOT_US);
+      } else {
+        err = mn12832l_spi_scan_dwell(blank, false, 0);
+        if (err == ESP_OK) esp_rom_delay_us(SLOT_US);
+      }
+      if (err != ESP_OK) goto first24_shutdown;
+    }
+    vTaskDelay(1);
+
+    ++measured_frames;
+    int64_t measure_now = esp_timer_get_time();
+    if (measure_now - measurement_start >= 2000000) {
+      printf("FIRST24 %s COL %d: %.2f frames/s\n",
+             pattern_names[pattern], single_col,
+             (double)measured_frames * 1000000.0 /
+                 (double)(measure_now - measurement_start));
+      fflush(stdout);
+      measurement_start = measure_now;
+      measured_frames = 0;
+    }
+
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') {
+        printf("Quit requested.\n");
+        goto first24_shutdown;
+      }
+      bool accepted = true;
+      bool force_off = false;
+      if (key >= '1' && key <= '5') {
+        pattern = key - '1';
+      } else if (key == 'n' || key == 'N' || key == ' ') {
+        pattern = 4;
+        single_col = single_col == 24 ? 1 : single_col + 1;
+      } else if (key == 'p' || key == 'P') {
+        pattern = 4;
+        single_col = single_col == 1 ? 24 : single_col - 1;
+      } else if (key == '0') {
+        force_off = true;
+      } else {
+        accepted = false;
+      }
+      if (!accepted) continue;
+      gpio_set_level(PIN_BLK, 1);
+      uint32_t column_mask = pattern == 4
+          ? (1u << (single_col - 1)) : masks[pattern];
+      if (force_off) column_mask = 0;
+      mn12832l_encode_first24_pattern(column_mask, scans, active_slots);
+      last_input = esp_timer_get_time();
+      measurement_start = last_input;
+      measured_frames = 0;
+      if (force_off) {
+        printf("FIRST24 ALL OFF\n");
+      } else if (pattern == 4) {
+        const mn12832l_physical_column_t *m =
+            &mn12832l_first24_map[single_col - 1];
+        printf("FIRST24 SINGLE col %d: G%d/%c\n",
+               single_col, m->grid, m->anode);
+      } else {
+        printf("FIRST24 PATTERN %d: %s\n",
+               pattern + 1, pattern_names[pattern]);
+      }
+      fflush(stdout);
+      break;
+    }
+  }
+
+first24_shutdown:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L first-24 experiment ended: %s\n",
+         esp_err_to_name(err));
+  return err;
+}
+
 /* A/B/C/D grid-phase diagnostic. All modes do two SPI transfers per scan
  * with two 250us slots:
  * A = paired grids / blank
