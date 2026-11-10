@@ -1133,37 +1133,46 @@ esp_err_t mn12832l_spi_column5_dwell_test(void) {
   typedef struct {
     bool col4;
     bool col5;
+    bool col6;
     uint16_t c5_dwell_us;
     const char *name;
   } mode_t;
   static const mode_t modes[] = {
-      {true,  true,  250, "C4 + C5, 250us baseline"},
-      {true,  true,  375, "C4 + C5, C5 375us (1.5x)"},
-      {true,  true,  500, "C4 + C5, C5 500us (2x)"},
-      {true,  false, 250, "C4 only, 250us reference"},
-      {false, true,  250, "C5 only, 250us baseline"},
-      {false, true,  500, "C5 only, 500us (2x)"}
+      {true,  true,  false, 250, "C4 + C5, 250us baseline"},
+      {true,  true,  false, 375, "C4 + C5, C5 375us (1.5x)"},
+      {true,  true,  false, 500, "C4 + C5, C5 500us (2x)"},
+      {true,  false, false, 250, "C4 only, 250us reference"},
+      {false, true,  false, 250, "C5 only, 250us baseline"},
+      {false, true,  false, 500, "C5 only, 500us (2x)"},
+      {true,  true,  true,  250, "C4+C5+C6, 250us baseline"},
+      {true,  true,  true,  375, "C4+C5+C6, G3 375us (both C5 and C6)"}
   };
   static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
   uint8_t c4_frame[MN12832L_FRAME_BYTES] = {0};
   uint8_t c5_frame[MN12832L_FRAME_BYTES] = {0};
+  uint8_t c56_frame[MN12832L_FRAME_BYTES] = {0};
   mn12832l_select_grid(c4_frame, 2);
   mn12832l_select_grid(c5_frame, 3);
+  mn12832l_select_grid(c56_frame, 3);
   for (int row = 9; row <= 24; ++row) {
     mn12832l_set_anode(c4_frame, (uint8_t)row, 'D');
     mn12832l_set_anode(c5_frame, (uint8_t)row, 'E');
+    mn12832l_set_anode(c56_frame, (uint8_t)row, 'E');
+    mn12832l_set_anode(c56_frame, (uint8_t)row, 'F');
   }
 
   esp_err_t err = mn12832l_spi_init();
   if (err != ESP_OK) return err;
-  int selected = 0; /* numbered mode #1 */
+  int selected = 6; /* starts at #7: all three columns */
   int64_t on_start, last_input;
   gpio_set_level(PIN_BLK, 1);
   gpio_set_level(PIN_HV, 0);
   gpio_set_level(PIN_EF, 0);
   printf("MN12832L C5 dwell test: 16-row stripes, C4 reference\n");
   printf("1=C4+C5 250us; 2=C4+C5 C5 375us; 3=C4+C5 C5 500us\n");
-  printf("4=C4 only; 5=C5 only 250us; 6=C5 only 500us; 0=blank; q=quit\n");
+  printf("4=C4 only; 5=C5 only 250us; 6=C5 only 500us\n");
+  printf("7=all three 250us; 8=all three G3 375us; 0=blank; q=quit\n");
+  printf("NOTE: C5 and C6 share G3; both get the increased dwell in #8.\n");
   printf("Fixed approximate frame length; C5 max 2x baseline duty.\n");
   printf("5min idle / 15min cumulative HV maximum; stop if ghosting appears.\n");
   fflush(stdout);
@@ -1171,7 +1180,7 @@ esp_err_t mn12832l_spi_column5_dwell_test(void) {
   vTaskDelay(pdMS_TO_TICKS(2000));
   gpio_set_level(PIN_HV, 1);
   on_start = last_input = esp_timer_get_time();
-  printf("TEST #1: %s\n", modes[selected].name);
+  printf("TEST #7: %s\n", modes[selected].name);
   fflush(stdout);
 
   for (;;) {
@@ -1181,15 +1190,15 @@ esp_err_t mn12832l_spi_column5_dwell_test(void) {
       printf("C5 dwell test timeout; powering down.\n");
       break;
     }
-    const mode_t *mode = selected < 6 ? &modes[selected] : NULL;
+    const mode_t *mode = selected < 8 ? &modes[selected] : NULL;
     uint16_t extra_us = (mode != NULL && mode->col5)
         ? mode->c5_dwell_us - BASE_US : 0;
     for (int slot = 0; slot < MN12832L_SCAN_COUNT; ++slot) {
       if (slot == 1 && mode != NULL && mode->col4) {
         err = mn12832l_spi_scan_dwell(c4_frame, true, BASE_US);
       } else if (slot == 2 && mode != NULL && mode->col5) {
-        err = mn12832l_spi_scan_dwell(c5_frame, true,
-                                       mode->c5_dwell_us);
+        err = mn12832l_spi_scan_dwell(mode->col6 ? c56_frame : c5_frame,
+                                       true, mode->c5_dwell_us);
       } else {
         err = mn12832l_spi_scan_dwell(blank, false, 0);
         if (err == ESP_OK) {
@@ -1208,14 +1217,14 @@ esp_err_t mn12832l_spi_column5_dwell_test(void) {
         printf("Quit requested.\n");
         goto column5_dwell_shutdown;
       }
-      int next = (key >= '1' && key <= '6') ? key - '1'
-                : (key == '0' ? 6 : -1);
+      int next = (key >= '1' && key <= '8') ? key - '1'
+                : (key == '0' ? 8 : -1);
       if (next < 0) continue;
       gpio_set_level(PIN_BLK, 1);
       selected = next;
       last_input = esp_timer_get_time();
       printf("TEST #%c: %s\n", key,
-             selected == 6 ? "all blank" : modes[selected].name);
+             selected == 8 ? "all blank" : modes[selected].name);
       fflush(stdout);
       break;
     }
