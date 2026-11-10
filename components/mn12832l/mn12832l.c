@@ -649,6 +649,132 @@ static void mn12832l_manual_dump_transition(
   fflush(stdout);
 }
 
+/* Electrode map, bypassing the guessed framebuffer encoder entirely.
+ * One grid and ONE anode letter in each of rows 9..24 are asserted during
+ * a single 250us slot per 44-slot scan cycle. Other slots remain blank.
+ * The 16-row stripe makes a physical COLUMN visible for manual mapping.
+ *
+ * Controls: 1..9 select grids 1..9; n/p next/previous grid (1..12),
+ * a..f select the named anode lane; q quits. Every valid input resets
+ * the 30s inactivity timer. HV shuts down by 120s in all cases.
+ * No grid is continuously energized while a command is inspected.
+ */
+esp_err_t mn12832l_spi_electrode_map_test(void) {
+  enum {
+    FIRST_GRID = 1, LAST_GRID = 12,
+    FIRST_ROW = 9, LAST_ROW = 24,
+    DWELL_US = 250,
+    MAX_ON_US = 120000000,
+    MAX_IDLE_US = 30000000
+  };
+  static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
+  static uint8_t active[MN12832L_FRAME_BYTES];
+  const char anodes[] = "ABCDEF";
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) return err;
+
+  int grid = 1;
+  int anode_index = 0;
+  uint32_t measured_frames = 0;
+  int64_t on_start, last_input, measurement_start;
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+
+  memset(active, 0, sizeof(active));
+  mn12832l_select_grid(active, (uint8_t)grid);
+  for (int row = FIRST_ROW; row <= LAST_ROW; ++row)
+    mn12832l_set_anode(active, (uint8_t)row, anodes[anode_index]);
+
+  printf("MN12832L physical electrode map: ONE grid, ONE anode/row\n");
+  printf("1..9=grid; n/p=next/previous grid 1..12; a..f=anode; q=quit\n");
+  printf("Map physical column number and brightness for each grid/anode.\n");
+  printf("250us dwell once per 44 slots; 30s idle, 120s HV maximum.\n");
+  fflush(stdout);
+
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  on_start = esp_timer_get_time();
+  last_input = measurement_start = on_start;
+  printf("MAP GRID %02d ANODE %c (rows %d..%d)\n",
+         grid, anodes[anode_index], FIRST_ROW, LAST_ROW);
+  fflush(stdout);
+
+  for (;;) {
+    int64_t now = esp_timer_get_time();
+    if (now - on_start >= MAX_ON_US || now - last_input >= MAX_IDLE_US) {
+      err = ESP_ERR_TIMEOUT;
+      printf("Electrode map timeout; shutting down.\n");
+      break;
+    }
+    for (int slot = 0; slot < MN12832L_SCAN_COUNT; ++slot) {
+      err = mn12832l_spi_scan_dwell(slot == grid - 1 ? active : blank,
+                                    slot == grid - 1, DWELL_US);
+      if (err != ESP_OK) goto electrode_map_shutdown;
+    }
+    /* IDLE task must run; watchdog stays enabled. */
+    vTaskDelay(1);
+    ++measured_frames;
+    int64_t measured_now = esp_timer_get_time();
+    if (measured_now - measurement_start >= 2000000) {
+      printf("MAP GRID %02d ANODE %c REFRESH %.2f frames/s\n",
+             grid, anodes[anode_index],
+             (double)measured_frames * 1000000.0 /
+                 (double)(measured_now - measurement_start));
+      fflush(stdout);
+      measured_frames = 0;
+      measurement_start = measured_now;
+    }
+
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') {
+        printf("Quit requested.\n");
+        goto electrode_map_shutdown;
+      }
+      int next_grid = grid;
+      int next_anode = anode_index;
+      if (key >= '1' && key <= '9') {
+        next_grid = key - '0';
+      } else if (key == 'n' || key == 'N' || key == ' ') {
+        next_grid = grid == LAST_GRID ? FIRST_GRID : grid + 1;
+      } else if (key == 'p' || key == 'P') {
+        next_grid = grid == FIRST_GRID ? LAST_GRID : grid - 1;
+      } else if (key >= 'a' && key <= 'f') {
+        next_anode = key - 'a';
+      } else if (key >= 'A' && key <= 'F') {
+        next_anode = key - 'A';
+      } else {
+        continue;
+      }
+      gpio_set_level(PIN_BLK, 1);
+      grid = next_grid;
+      anode_index = next_anode;
+      memset(active, 0, sizeof(active));
+      mn12832l_select_grid(active, (uint8_t)grid);
+      for (int row = FIRST_ROW; row <= LAST_ROW; ++row)
+        mn12832l_set_anode(active, (uint8_t)row, anodes[anode_index]);
+
+      last_input = esp_timer_get_time();
+      measurement_start = last_input;
+      measured_frames = 0;
+      printf("MAP GRID %02d ANODE %c (rows %d..%d)\n",
+             grid, anodes[anode_index], FIRST_ROW, LAST_ROW);
+      fflush(stdout);
+      break;
+    }
+  }
+
+electrode_map_shutdown:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L electrode map ended: %s\n", esp_err_to_name(err));
+  return err;
+}
+
 /* A/B/C/D grid-phase diagnostic. All modes do two SPI transfers per scan
  * with two 250us slots:
  * A = paired grids / blank
