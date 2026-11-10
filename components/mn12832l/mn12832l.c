@@ -225,12 +225,24 @@ esp_err_t mn12832l_spi_dry_run(const uint8_t *framebuffer) {
   return err;
 }
 
-esp_err_t mn12832l_spi_illumination_test(const uint8_t *framebuffer) {
+static esp_err_t mn12832l_spi_illumination_test_mode(
+    const uint8_t *framebuffer, bool reference_phase) {
   if (framebuffer == NULL) {
     return ESP_ERR_INVALID_ARG;
   }
   uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
   mn12832l_encode_frame(framebuffer, scans);
+  if (reference_phase) {
+    // The reference Arduino driver reserves scan slots 0 and 1 for no
+    // pixel data. Keep our verified grid bits in place and shift only
+    // the first 192 (anode) bits two slots forward. The last two logical
+    // columns are not represented in this experimental mode.
+    for (int scan = MN12832L_SCAN_COUNT - 1; scan >= 2; --scan) {
+      memcpy(scans[scan], scans[scan - 2], 24);
+    }
+    memset(scans[0], 0, 24);
+    memset(scans[1], 0, 24);
+  }
   esp_err_t err = mn12832l_spi_init();
   if (err != ESP_OK) {
     return err;
@@ -263,11 +275,20 @@ shutdown:
   gpio_set_level(PIN_HV, 0);
   gpio_set_level(PIN_EF, 0);
   int64_t elapsed = esp_timer_get_time() - start;
-  printf("MN12832L SPI: %d/%d cycles in %lld us (~%.1f Hz), status=%s\n",
+  printf("MN12832L SPI [%s]: %d/%d cycles in %lld us (~%.1f Hz), status=%s\n",
+         reference_phase ? "reference +2 phase" : "original phase",
          completed, max_cycles, (long long)elapsed,
          elapsed > 0 ? (1000000.0 * completed / elapsed) : 0.0,
          esp_err_to_name(err));
   return err;
+}
+
+esp_err_t mn12832l_spi_illumination_test(const uint8_t *framebuffer) {
+  return mn12832l_spi_illumination_test_mode(framebuffer, false);
+}
+
+esp_err_t mn12832l_spi_phase_shift_test(const uint8_t *framebuffer) {
+  return mn12832l_spi_illumination_test_mode(framebuffer, true);
 }
 
 /* Walk a single 16-pixel-tall vertical segment through 18 logical columns.

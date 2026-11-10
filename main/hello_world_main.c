@@ -86,8 +86,10 @@ void app_main(void) {
   // diagnostics BEFORE the first SPI call, never concurrently with it.
   ESP_ERROR_CHECK(mn12832l_spi_dry_run(frame));
 
-  // Isolate physical grid selection with only anode A (rows 8..23).
-  ESP_ERROR_CHECK(mn12832l_spi_grid_walk());
+  // Experiment: preserve grid and SPI timing, shift only the anode
+  // payload two scan slots to match the reference Arduino driver's phase.
+  ESP_ERROR_CHECK(mn12832l_spi_phase_shift_test(frame));
+  // ESP_ERROR_CHECK(mn12832l_spi_grid_walk());
   // ESP_ERROR_CHECK(mn12832l_spi_column_walk());
   // ESP_ERROR_CHECK(mn12832l_spi_illumination_test(frame));
 }
