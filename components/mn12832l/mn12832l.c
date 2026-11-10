@@ -1237,6 +1237,110 @@ column5_dwell_shutdown:
   return err;
 }
 
+/* AUTOMATIC isolated physical-column-5 characterization.
+ * One 16-pixel stripe only (physical C5, anode E), no neighboring anodes.
+ * 6 numbered stages, 5s each, ending with an identical baseline repeat.
+ * Never exceed the previously exercised 500us per active scan.
+ *
+ * This establishes whether moderate grid/duty changes help C5; a negative
+ * result is NOT proof that the hardware has no other drive possibilities.
+ */
+esp_err_t mn12832l_spi_c5_auto_sweep(void) {
+  enum { BASE_US = 250, STAGE_US = 5000000,
+         MAX_TOTAL_US = 40000000 };
+  typedef struct {
+    uint8_t grid;
+    uint16_t on_us;
+    const char *label;
+  } sweep_t;
+  static const sweep_t stages[] = {
+      {3, 250, "preferred G3/E baseline"},
+      {3, 375, "preferred G3/E 1.5x dwell"},
+      {3, 500, "preferred G3/E 2x dwell"},
+      {2, 250, "neighbor G2/E baseline"},
+      {2, 500, "neighbor G2/E 2x dwell"},
+      {3, 250, "G3/E baseline REPEAT"}
+  };
+  static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
+  uint8_t frames[2][MN12832L_FRAME_BYTES] = {{0}};
+  for (int i = 0; i < 2; ++i) {
+    mn12832l_select_grid(frames[i], (uint8_t)(i + 2));
+    for (int row = 9; row <= 24; ++row)
+      mn12832l_set_anode(frames[i], (uint8_t)row, 'E');
+  }
+
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) return err;
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("C5 AUTO SWEEP: one 16-pixel stripe, 6 stages x 5 seconds.\n");
+  printf("1 G3 250us | 2 G3 375us | 3 G3 500us\n");
+  printf("4 G2 250us | 5 G2 500us | 6 G3 250us repeat\n");
+  printf("No keys necessary; press q to abort. HV and EF auto-off at finish.\n");
+  fflush(stdout);
+
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  const int64_t begin = esp_timer_get_time();
+  int64_t stage_start = begin;
+  int stage = 0;
+  printf("STAGE #1/6: %s\n", stages[0].label);
+  fflush(stdout);
+
+  while (stage < 6) {
+    int64_t now = esp_timer_get_time();
+    if (now - begin >= MAX_TOTAL_US) {
+      err = ESP_ERR_TIMEOUT;
+      printf("Hard time limit reached.\n");
+      break;
+    }
+    if (now - stage_start >= STAGE_US) {
+      ++stage;
+      if (stage >= 6) break;
+      gpio_set_level(PIN_BLK, 1);
+      stage_start = now;
+      printf("STAGE #%d/6: %s\n", stage + 1, stages[stage].label);
+      fflush(stdout);
+    }
+    const sweep_t *s = &stages[stage];
+    const int active_slot = s->grid - 1;
+    const uint32_t extra_us = s->on_us - BASE_US;
+    for (int slot = 0; slot < MN12832L_SCAN_COUNT; ++slot) {
+      if (slot == active_slot) {
+        err = mn12832l_spi_scan_dwell(frames[s->grid - 2], true,
+                                       s->on_us);
+      } else {
+        err = mn12832l_spi_scan_dwell(blank, false, 0);
+        if (err == ESP_OK) {
+          /* The always-inactive first slot absorbs the extra dwell time. */
+          uint32_t idle_us = slot == 0 ? BASE_US - extra_us : BASE_US;
+          if (idle_us > 0) esp_rom_delay_us(idle_us);
+        }
+      }
+      if (err != ESP_OK) goto c5_sweep_shutdown;
+    }
+    vTaskDelay(1);
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') {
+        printf("Operator requested shutdown.\n");
+        goto c5_sweep_shutdown;
+      }
+    }
+  }
+
+c5_sweep_shutdown:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("C5 automatic sweep finished; HV/EF disabled, status=%s\n",
+         esp_err_to_name(err));
+  fflush(stdout);
+  return err;
+}
+
 /* Pixel-coordinate diagnostic: verify row ordering, single-pixel isolation,
  * and asymmetric shapes on independently validated columns 4,5,6.
  *
