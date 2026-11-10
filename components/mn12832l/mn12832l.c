@@ -1118,6 +1118,116 @@ first24_shutdown:
   return err;
 }
 
+/* Bench comparison: does extra grid-on time compensate for the dim
+ * physical column 5, underneath the visible black vertical structure?
+ *
+ * G2/D lights physical column 4 (reference); G3/E lights column 5.
+ * Keep column 6 OFF: it shares G3 and would receive the same dwell boost.
+ * The entire 44-slot frame remains approximately constant in duration by
+ * subtracting the extra G3 dwell from the first inactive slot.
+ * Never exceed 500us active dwell (2x the verified 250us baseline).
+ */
+esp_err_t mn12832l_spi_column5_dwell_test(void) {
+  enum { BASE_US = 250, MAX_IDLE_US = 300000000,
+         MAX_ON_US = 900000000 };
+  typedef struct {
+    bool col4;
+    bool col5;
+    uint16_t c5_dwell_us;
+    const char *name;
+  } mode_t;
+  static const mode_t modes[] = {
+      {true,  true,  250, "C4 + C5, 250us baseline"},
+      {true,  true,  375, "C4 + C5, C5 375us (1.5x)"},
+      {true,  true,  500, "C4 + C5, C5 500us (2x)"},
+      {true,  false, 250, "C4 only, 250us reference"},
+      {false, true,  250, "C5 only, 250us baseline"},
+      {false, true,  500, "C5 only, 500us (2x)"}
+  };
+  static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
+  uint8_t c4_frame[MN12832L_FRAME_BYTES] = {0};
+  uint8_t c5_frame[MN12832L_FRAME_BYTES] = {0};
+  mn12832l_select_grid(c4_frame, 2);
+  mn12832l_select_grid(c5_frame, 3);
+  for (int row = 9; row <= 24; ++row) {
+    mn12832l_set_anode(c4_frame, (uint8_t)row, 'D');
+    mn12832l_set_anode(c5_frame, (uint8_t)row, 'E');
+  }
+
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) return err;
+  int selected = 0; /* numbered mode #1 */
+  int64_t on_start, last_input;
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L C5 dwell test: 16-row stripes, C4 reference\n");
+  printf("1=C4+C5 250us; 2=C4+C5 C5 375us; 3=C4+C5 C5 500us\n");
+  printf("4=C4 only; 5=C5 only 250us; 6=C5 only 500us; 0=blank; q=quit\n");
+  printf("Fixed approximate frame length; C5 max 2x baseline duty.\n");
+  printf("5min idle / 15min cumulative HV maximum; stop if ghosting appears.\n");
+  fflush(stdout);
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  on_start = last_input = esp_timer_get_time();
+  printf("TEST #1: %s\n", modes[selected].name);
+  fflush(stdout);
+
+  for (;;) {
+    int64_t now = esp_timer_get_time();
+    if (now - on_start >= MAX_ON_US || now - last_input >= MAX_IDLE_US) {
+      err = ESP_ERR_TIMEOUT;
+      printf("C5 dwell test timeout; powering down.\n");
+      break;
+    }
+    const mode_t *mode = selected < 6 ? &modes[selected] : NULL;
+    uint16_t extra_us = (mode != NULL && mode->col5)
+        ? mode->c5_dwell_us - BASE_US : 0;
+    for (int slot = 0; slot < MN12832L_SCAN_COUNT; ++slot) {
+      if (slot == 1 && mode != NULL && mode->col4) {
+        err = mn12832l_spi_scan_dwell(c4_frame, true, BASE_US);
+      } else if (slot == 2 && mode != NULL && mode->col5) {
+        err = mn12832l_spi_scan_dwell(c5_frame, true,
+                                       mode->c5_dwell_us);
+      } else {
+        err = mn12832l_spi_scan_dwell(blank, false, 0);
+        if (err == ESP_OK) {
+          /* G1 is always inactive: compensate for the boosted G3 dwell
+           * without changing the fixed scan count or other active slots. */
+          uint32_t wait_us = slot == 0 ? BASE_US - extra_us : BASE_US;
+          if (wait_us != 0) esp_rom_delay_us(wait_us);
+        }
+      }
+      if (err != ESP_OK) goto column5_dwell_shutdown;
+    }
+    vTaskDelay(1);
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') {
+        printf("Quit requested.\n");
+        goto column5_dwell_shutdown;
+      }
+      int next = (key >= '1' && key <= '6') ? key - '1'
+                : (key == '0' ? 6 : -1);
+      if (next < 0) continue;
+      gpio_set_level(PIN_BLK, 1);
+      selected = next;
+      last_input = esp_timer_get_time();
+      printf("TEST #%c: %s\n", key,
+             selected == 6 ? "all blank" : modes[selected].name);
+      fflush(stdout);
+      break;
+    }
+  }
+column5_dwell_shutdown:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L C5 dwell test ended: %s\n", esp_err_to_name(err));
+  return err;
+}
+
 /* Pixel-coordinate diagnostic: verify row ordering, single-pixel isolation,
  * and asymmetric shapes on independently validated columns 4,5,6.
  *
