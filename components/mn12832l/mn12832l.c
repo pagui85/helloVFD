@@ -592,6 +592,56 @@ shutdown_cumulative:
   return err;
 }
 
+/* For manual-fill debugging: raw 30-byte scan frames in SPI order.
+ * Bytes 0..23 are anode bits, 24..29 are grid bits.
+ */
+static void mn12832l_manual_dump_scan(const uint8_t *frame) {
+  for (int b = 0; b < MN12832L_FRAME_BYTES; ++b) {
+    printf("%02X", frame[b]);
+    if (b != MN12832L_FRAME_BYTES - 1) {
+      putchar(b == 23 ? '|' : ' ');
+    }
+  }
+  putchar('\n');
+}
+
+static void mn12832l_manual_dump_transition(
+    const uint8_t *framebuffer,
+    const uint8_t before[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES],
+    const uint8_t after[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES],
+    int lit_columns) {
+  printf("FRAMEBUFFER y=8 x=0..15, 1=ON: ");
+  for (int x = 0; x < 16; ++x) {
+    unsigned pos = 8 * 16 + x / 8;
+    putchar((framebuffer[pos] & (0x80u >> (x % 8))) ? '0' : '1');
+  }
+  printf("   I1 raw: %02X %02X (0=ON)\n",
+         framebuffer[8 * 16], framebuffer[8 * 16 + 1]);
+
+  int changed_scans = 0;
+  for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
+    if (memcmp(before[scan], after[scan], MN12832L_FRAME_BYTES) == 0) {
+      continue;
+    }
+    ++changed_scans;
+    printf("SCAN %02d changed at step %d:\n", scan, lit_columns);
+    printf("  OLD: ");
+    mn12832l_manual_dump_scan(before[scan]);
+    printf("  NEW: ");
+    mn12832l_manual_dump_scan(after[scan]);
+    printf("  XOR: ");
+    for (int b = 0; b < MN12832L_FRAME_BYTES; ++b) {
+      printf("%02X", before[scan][b] ^ after[scan][b]);
+      if (b != MN12832L_FRAME_BYTES - 1) {
+        putchar(b == 23 ? '|' : ' ');
+      }
+    }
+    putchar('\n');
+  }
+  printf("CHANGED SCANS: %d/%d\n", changed_scans, MN12832L_SCAN_COUNT);
+  fflush(stdout);
+}
+
 /* Manual 16-column cumulative fill for frame-by-frame observations.
  * Send a space through the primary ESP-IDF serial console to add a column;
  * 'q' exits. The displayed frame is continuously multiplexed even while
@@ -616,6 +666,7 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
 
   uint8_t framebuffer[128 * 32 / 8];
   uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+  uint8_t old_scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
   int lit_columns = 1;
   int64_t on_start = 0;
   int64_t last_input = 0;
@@ -645,6 +696,7 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
   on_start = esp_timer_get_time();
   last_input = on_start;
   printf("COLUMN 1/16: logical X=0 lit\n");
+  printf("FRAMEBUFFER y=8 x=0..15, 1=ON: 1000000000000000   I1 raw: 7F FF\n");
   fflush(stdout);
 
   while (!finished) {
@@ -688,7 +740,11 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
             (uint8_t)~(0x80u >> (x % 8));
       }
       ++lit_columns;
+      memcpy(old_scans, scans, sizeof(old_scans));
       mn12832l_encode_frame(framebuffer, scans);
+      gpio_set_level(PIN_BLK, 1);
+      mn12832l_manual_dump_transition(framebuffer, old_scans, scans,
+                                      lit_columns);
       printf("COLUMN %d/%d: logical X=0..%d lit\n",
              lit_columns, WIDTH, lit_columns - 1);
       fflush(stdout);
