@@ -502,6 +502,95 @@ shutdown_grid_pair:
   return err;
 }
 
+/* Cumulative logical-column mapping diagnostic. The active-low I1
+ * framebuffer grows one column at a time, then shrinks one column at a time.
+ * Uses the existing (as-yet unverified) encoder; unusual physical patterns
+ * are precisely what this test is intended to reveal.
+ *
+ * This is a SUPERVISED, bounded bench test, not continuous display firmware.
+ * A wall-clock limit covers both passes even if SPI refresh slows down.
+ * BLK remains asserted for every transfer/latch and all exit paths disable
+ * HV and EF. No hardware-independent safety interlock is provided.
+ */
+esp_err_t mn12832l_spi_cumulative_fill_test(void) {
+  enum {
+    WIDTH = 128,
+    FRAMEBUFFER_BYTES = WIDTH * 32 / 8,
+    STRIP_Y_START = 8,
+    STRIP_Y_END = 24,
+    STEP_US = 180000,
+    GAP_MS = 250,
+    MAX_TEST_US = 55000000
+  };
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  uint8_t framebuffer[FRAMEBUFFER_BYTES];
+  uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+  int64_t run_start = 0;
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  run_start = esp_timer_get_time();
+
+  printf("MN12832L cumulative fill: 0->128->0 columns, Y=8..23, "
+         "180 ms/step; max 55 s HV-on\n");
+  fflush(stdout);
+
+  /* Pass 0 adds X=0..127. Pass 1 removes X=127..0.
+   * The first step in the second pass starts with 127 columns on. */
+  for (int pass = 0; pass < 2; ++pass) {
+    if (pass == 1) {
+      gpio_set_level(PIN_BLK, 1);
+      vTaskDelay(pdMS_TO_TICKS(GAP_MS));
+    }
+
+    for (int step = 1; step <= WIDTH; ++step) {
+      int lit_columns = (pass == 0) ? step : WIDTH - step;
+      memset(framebuffer, 0xFF, sizeof(framebuffer));
+      for (int y = STRIP_Y_START; y < STRIP_Y_END; ++y) {
+        for (int x = 0; x < lit_columns; ++x) {
+          framebuffer[y * 16 + x / 8] &=
+              (uint8_t)~(0x80u >> (x % 8));
+        }
+      }
+      mn12832l_encode_frame(framebuffer, scans);
+      printf("%s: %3d/%3d logical columns\n",
+             pass == 0 ? "FILL " : "ERASE", lit_columns, WIDTH);
+      fflush(stdout);
+
+      int64_t step_end = esp_timer_get_time() + STEP_US;
+      do {
+        if (esp_timer_get_time() - run_start >= MAX_TEST_US) {
+          err = ESP_ERR_TIMEOUT;
+          goto shutdown_cumulative;
+        }
+        for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
+          err = mn12832l_spi_scan(scans[scan], true);
+          if (err != ESP_OK) {
+            goto shutdown_cumulative;
+          }
+        }
+      } while (esp_timer_get_time() < step_end);
+    }
+  }
+
+shutdown_cumulative:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L cumulative fill complete: %lld ms, status=%s\n",
+         (long long)((esp_timer_get_time() - run_start) / 1000),
+         esp_err_to_name(err));
+  return err;
+}
+
 static void mn12832l_refresh_dry_run(
     uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES]) {
   // Keep the display safely disabled.
