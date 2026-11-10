@@ -853,6 +853,155 @@ shutdown_single_ab:
   return err;
 }
 
+/* Four-pattern overlap check, 1-based logical columns:
+ * 1: 8
+ * 2: 16
+ * 3: 8 and 16
+ * 4: 8, 16 and 24
+ *
+ * The existing logical-to-electrode encoder is deliberately untouched.
+ * Grid modes A/B/C/D are identical to the previous isolation experiment.
+ * A full 44-scan refresh runs even when only one column is active.
+ */
+esp_err_t mn12832l_spi_overlap_pattern_test(void) {
+  enum {
+    ROW_START = 8, ROW_END = 24,
+    MAX_ON_US = 120000000,
+    MAX_IDLE_US = 30000000
+  };
+  static const int logical_columns[3] = {8, 16, 24};
+  static const uint8_t patterns[4] = {
+      0x01, /* 8 */
+      0x02, /* 16 */
+      0x03, /* 8+16 */
+      0x07  /* 8+16+24 */
+  };
+  static const char *names[4] = {
+      "8", "16", "8 + 16", "8 + 16 + 24"
+  };
+  /* Static storage avoids overflowing the main ESP-IDF task stack. */
+  static uint8_t framebuffer[128 * 32 / 8];
+  static uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) return err;
+
+  int selected = 0;
+  char mode = 'A';
+  uint32_t measured_frames = 0;
+  int64_t on_start = 0, last_input = 0, measurement_start = 0;
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+
+  /* Construct pattern 1 before power-up. Preserve active-low I1 format. */
+  memset(framebuffer, 0xFF, sizeof(framebuffer));
+  for (int y = ROW_START; y < ROW_END; ++y) {
+    int x = 7;
+    framebuffer[y * 16 + x / 8] &= (uint8_t)~(0x80u >> (x % 8));
+  }
+  mn12832l_encode_frame(framebuffer, scans);
+
+  printf("MN12832L four-pattern test, Y=8..23\n");
+  printf("1=8; 2=16; 3=8+16; 4=8+16+24; SPACE/N=next; P=previous\n");
+  printf("A=paired; B=sequential; C=previous grid; D=next grid; Q=quit\n");
+  printf("30s inactivity / 120s total HV-on timeout.\n");
+  fflush(stdout);
+
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  on_start = esp_timer_get_time();
+  last_input = measurement_start = on_start;
+  printf("PATTERN 1/4: %s, MODE A\n", names[selected]);
+  fflush(stdout);
+
+  while (true) {
+    int64_t now = esp_timer_get_time();
+    if (now - on_start >= MAX_ON_US || now - last_input >= MAX_IDLE_US) {
+      printf("Four-pattern timeout; shutting down.\n");
+      err = ESP_ERR_TIMEOUT;
+      break;
+    }
+
+    for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
+      err = mn12832l_manual_timed_scan(scans[scan], scan, mode);
+      if (err != ESP_OK) goto overlap_shutdown;
+    }
+    /* Maintain the idle-task watchdog and blanked state between frames. */
+    vTaskDelay(1);
+
+    measured_frames++;
+    int64_t measured_now = esp_timer_get_time();
+    if (measured_now - measurement_start >= 2000000) {
+      printf("REFRESH MODE %c PATTERN %d: %.2f frames/s\n",
+             mode, selected + 1,
+             (double)measured_frames * 1000000.0 /
+                 (double)(measured_now - measurement_start));
+      fflush(stdout);
+      measured_frames = 0;
+      measurement_start = measured_now;
+    }
+
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') {
+        printf("Quit requested.\n");
+        goto overlap_shutdown;
+      }
+      if ((key >= 'a' && key <= 'd') ||
+          (key >= 'A' && key <= 'D')) {
+        mode = (key >= 'a' && key <= 'd')
+                   ? (char)(key - 'a' + 'A') : key;
+        last_input = esp_timer_get_time();
+        measured_frames = 0;
+        measurement_start = last_input;
+        gpio_set_level(PIN_BLK, 1);
+        printf("PATTERN %d/4: %s; MODE %c\n",
+               selected + 1, names[selected], mode);
+        fflush(stdout);
+        break;
+      }
+
+      int next = selected;
+      if (key >= '1' && key <= '4') {
+        next = key - '1';
+      } else if (key == ' ' || key == 'n' || key == 'N') {
+        next = (selected + 1) % 4;
+      } else if (key == 'p' || key == 'P') {
+        next = (selected + 3) % 4;
+      } else {
+        continue;
+      }
+      last_input = esp_timer_get_time();
+      selected = next;
+      gpio_set_level(PIN_BLK, 1);
+      memset(framebuffer, 0xFF, sizeof(framebuffer));
+      for (int i = 0; i < 3; ++i) {
+        if ((patterns[selected] & (1u << i)) == 0) continue;
+        int x = logical_columns[i] - 1;  /* UI is 1-based. */
+        for (int y = ROW_START; y < ROW_END; ++y) {
+          framebuffer[y * 16 + x / 8] &=
+              (uint8_t)~(0x80u >> (x % 8));
+        }
+      }
+      mn12832l_encode_frame(framebuffer, scans);
+      printf("PATTERN %d/4: %s; MODE %c\n",
+             selected + 1, names[selected], mode);
+      fflush(stdout);
+      break;
+    }
+  }
+
+overlap_shutdown:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L four-pattern test ended: %s\n", esp_err_to_name(err));
+  return err;
+}
+
 /* Manual 16-column cumulative fill for frame-by-frame observations.
  * Send a space through the primary ESP-IDF serial console to add a column;
  * 'q' exits. The displayed frame is continuously multiplexed even while
