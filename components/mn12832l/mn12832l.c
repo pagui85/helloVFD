@@ -649,30 +649,61 @@ static void mn12832l_manual_dump_transition(
   fflush(stdout);
 }
 
-/* Experimental phase split: hold the anodes constant, drive each member
- * of the existing grid pair separately for half the normal 250 us dwell.
- * Grids are never driven simultaneously in mode B. This is a diagnostic,
- * not a verified correct mapping for the MN12832L glass. The extra SPI
- * transfer per scan changes overhead/refresh rate between modes.
+/* Controlled A/B grid timing comparison. Both modes use two 30-byte SPI
+ * transfers and 2 x 250 us dwell per logical scan:
+ *   A: both grids ON for 250 us; second phase is blank for 250 us.
+ *   B: Gx ON for 250 us, followed by Gx+1 ON for 250 us.
+ * Thus each grid receives 250 us per frame in either mode, and refresh
+ * overhead is comparable. The combined electrical load is intentionally
+ * different (paired versus isolated grids). This is still an experiment.
+ * Scan 0 has only G1 and receives an identical blank second phase in B.
  */
-static esp_err_t mn12832l_manual_split_scan(
-    const uint8_t frame[MN12832L_FRAME_BYTES], int scan) {
-  uint8_t isolated[MN12832L_FRAME_BYTES];
-  memcpy(isolated, frame, sizeof(isolated));
-  memset(isolated + 24, 0, 6);
-  if (scan > 0) {
-    mn12832l_select_grid(isolated, (uint8_t)scan);
-    esp_err_t err = mn12832l_spi_scan_dwell(isolated, true, 125);
+static esp_err_t mn12832l_manual_timed_scan(
+    const uint8_t frame[MN12832L_FRAME_BYTES], int scan,
+    bool split_grids) {
+  enum { PHASE_US = 250 };
+  static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
+  esp_err_t err;
+
+  if (!split_grids) {
+    err = mn12832l_spi_scan_dwell(frame, true, PHASE_US);
     if (err != ESP_OK) {
       return err;
     }
-    memset(isolated + 24, 0, 6);
-    mn12832l_select_grid(isolated, (uint8_t)(scan + 1));
-    return mn12832l_spi_scan_dwell(isolated, true, 125);
+    /* Dummy transfer matches the second SPI transaction in mode B.
+     * Keep BLK asserted throughout the off-phase. */
+    err = mn12832l_spi_scan_dwell(blank, false, 0);
+    if (err != ESP_OK) {
+      return err;
+    }
+    esp_rom_delay_us(PHASE_US);
+    return ESP_OK;
   }
-  /* Scan 0 contains only G1; preserve its total 250 us on-time. */
-  mn12832l_select_grid(isolated, 1);
-  return mn12832l_spi_scan_dwell(isolated, true, 250);
+
+  uint8_t isolated[MN12832L_FRAME_BYTES];
+  memcpy(isolated, frame, sizeof(isolated));
+  memset(isolated + 24, 0, 6);
+  mn12832l_select_grid(isolated, (uint8_t)(scan + 1));
+  if (scan > 0) {
+    /* Match the Gx then Gx+1 ordering of the prior experimental mode. */
+    memset(isolated + 24, 0, 6);
+    mn12832l_select_grid(isolated, (uint8_t)scan);
+  }
+  err = mn12832l_spi_scan_dwell(isolated, true, PHASE_US);
+  if (err != ESP_OK) {
+    return err;
+  }
+  if (scan == 0) {
+    err = mn12832l_spi_scan_dwell(blank, false, 0);
+    if (err != ESP_OK) {
+      return err;
+    }
+    esp_rom_delay_us(PHASE_US);
+    return ESP_OK;
+  }
+  memset(isolated + 24, 0, 6);
+  mn12832l_select_grid(isolated, (uint8_t)(scan + 1));
+  return mn12832l_spi_scan_dwell(isolated, true, PHASE_US);
 }
 
 /* Manual 16-column cumulative fill for frame-by-frame observations.
@@ -704,6 +735,8 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
   static uint8_t old_scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
   int lit_columns = 1;
   bool split_grids = false;  /* Mode A by default. */
+  uint32_t measured_frames = 0;
+  int64_t measurement_start = 0;
   int64_t on_start = 0;
   int64_t last_input = 0;
   bool finished = false;
@@ -722,8 +755,9 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
 
   printf("MN12832L manual fill: X=0..15, Y=8..23.\n");
   printf("SPACE=add column; a=paired grids; b=split grids; q=quit.\n");
-  printf("MODE A: both grids simultaneously, 250us dwell (baseline).\n");
-  printf("MODE B: grids separate, 125us each (same total dwell; extra SPI overhead).\n");
+  printf("MODE A: paired 250us, then blank 250us (2 SPI transfers).\n");
+  printf("MODE B: individual grids 250us each (2 SPI transfers).\n");
+  printf("Mode-matched timing; 2s measured refresh-rate reports.\n");
   printf("After column 16, another SPACE ends the test.\n");
   printf("Auto-off: 30 seconds idle or 120 seconds total HV-on.\n");
   fflush(stdout);
@@ -733,6 +767,7 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
   gpio_set_level(PIN_HV, 1);
   on_start = esp_timer_get_time();
   last_input = on_start;
+  measurement_start = on_start;
   printf("MODE A ACTIVE: paired grids\n");
   printf("COLUMN 1/16: logical X=0 lit\n");
   printf("FRAMEBUFFER y=8 x=0..15, 1=ON: 1000000000000000   I1 raw: 7F FF\n");
@@ -750,9 +785,7 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
     /* Refresh the full scan continuously, never wait for keyboard
      * input with the currently selected grid held unblanked. */
     for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
-      err = split_grids
-                ? mn12832l_manual_split_scan(scans[scan], scan)
-                : mn12832l_spi_scan(scans[scan], true);
+      err = mn12832l_manual_timed_scan(scans[scan], scan, split_grids);
       if (err != ESP_OK) {
         goto shutdown_manual_fill;
       }
@@ -763,6 +796,20 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
      * full 44-scan frame; the display remains blanked after the last scan.
      * Never disable the task watchdog to conceal a scheduling bug. */
     vTaskDelay(1);
+
+    ++measured_frames;
+    int64_t measure_now = esp_timer_get_time();
+    if (measure_now - measurement_start >= 2000000) {
+      printf("REFRESH MODE %c: %.2f frames/s (%lu frames in %lld ms)\n",
+             split_grids ? 'B' : 'A',
+             (double)measured_frames * 1000000.0 /
+                 (double)(measure_now - measurement_start),
+             (unsigned long)measured_frames,
+             (long long)((measure_now - measurement_start) / 1000));
+      fflush(stdout);
+      measured_frames = 0;
+      measurement_start = measure_now;
+    }
 
     /* The default ESP-IDF console VFS is non-blocking. Direct read
      * bypasses stdio's newline-oriented input buffering. */
@@ -776,11 +823,13 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
       if (key == 'a' || key == 'A' || key == 'b' || key == 'B') {
         split_grids = (key == 'b' || key == 'B');
         last_input = esp_timer_get_time();
+        measured_frames = 0;
+        measurement_start = last_input;
         gpio_set_level(PIN_BLK, 1);
         printf("MODE %c ACTIVE, COLUMN %d/16: %s\n",
                split_grids ? 'B' : 'A', lit_columns,
-               split_grids ? "separate Gx and Gx+1 (125us each)"
-                           : "paired grids (250us)");
+               split_grids ? "Gx then Gx+1, 250us each"
+                           : "paired 250us, blank 250us");
         fflush(stdout);
         break;
       }
