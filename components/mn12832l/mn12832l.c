@@ -994,18 +994,19 @@ esp_err_t mn12832l_spi_first24_corrected_test(void) {
   esp_err_t err = mn12832l_spi_init();
   if (err != ESP_OK) return err;
   int pattern = 4;
-  int single_col = 10;
+  int single_col = 1;
   uint32_t measured_frames = 0;
   int64_t on_start, last_input, measurement_start;
 
   gpio_set_level(PIN_BLK, 1);
   gpio_set_level(PIN_HV, 0);
   gpio_set_level(PIN_EF, 0);
-  mn12832l_encode_first24_pattern(1u << 9, scans, active_slots);
+  mn12832l_encode_first24_pattern(1u, scans, active_slots);
 
   printf("MN12832L EXPERIMENTAL single-grid encoder, physical columns 1..24\n");
   printf("Keys: 6=col10, 7=col11, 8=col12, 9=all three; 1=all24, 2=odd, 3=even, 4=8+16+24, 5=single\n");
-  printf("n/p=step single column (1..24); 0=off; q=quit\n");
+  printf("n/p=step one column; s=restart at col1; 0=off; q=quit\n");
+  printf("Record brightness for 1..24 in groups of three (middle has black stripe).\n");
   printf("Provisional map in firmware; 250us per scan slot; 5min idle/15min HV maximum\n");
   fflush(stdout);
 
@@ -1014,7 +1015,7 @@ esp_err_t mn12832l_spi_first24_corrected_test(void) {
   gpio_set_level(PIN_HV, 1);
   on_start = esp_timer_get_time();
   last_input = measurement_start = on_start;
-  printf("FIRST24 SINGLE col 10: G4/D (preferred)\n");
+  printf("SURVEY COL 01 (group 1, phase 1/3): G2/A\n");
   fflush(stdout);
 
   for (;;) {
@@ -1071,6 +1072,9 @@ esp_err_t mn12832l_spi_first24_corrected_test(void) {
       } else if (key == 'p' || key == 'P') {
         pattern = 4;
         single_col = single_col == 1 ? 24 : single_col - 1;
+      } else if (key == 's' || key == 'S') {
+        pattern = 4;
+        single_col = 1;
       } else if (key == '0') {
         force_off = true;
       } else {
@@ -1093,8 +1097,9 @@ esp_err_t mn12832l_spi_first24_corrected_test(void) {
       } else if (pattern == 4) {
         const mn12832l_physical_column_t *m =
             &mn12832l_first24_map[single_col - 1];
-        printf("FIRST24 SINGLE col %d: G%d/%c\n",
-               single_col, m->grid, m->anode);
+        printf("SURVEY COL %02d (group %d, phase %d/3): G%d/%c\n",
+               single_col, (single_col - 1) / 3 + 1,
+               (single_col - 1) % 3 + 1, m->grid, m->anode);
       } else {
         printf("FIRST24 PATTERN %d: %s\n",
                pattern + 1, pattern_names[pattern]);
