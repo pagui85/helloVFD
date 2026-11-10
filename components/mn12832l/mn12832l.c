@@ -664,9 +664,11 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
     return err;
   }
 
-  uint8_t framebuffer[128 * 32 / 8];
-  uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
-  uint8_t old_scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+  /* This bench-only function runs on app_main's relatively small stack.
+   * Keep the 3.2 KiB of diagnostic buffers in static DRAM instead. */
+  static uint8_t framebuffer[128 * 32 / 8];
+  static uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+  static uint8_t old_scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
   int lit_columns = 1;
   int64_t on_start = 0;
   int64_t last_input = 0;
