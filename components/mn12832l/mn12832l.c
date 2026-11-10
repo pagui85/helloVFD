@@ -1341,6 +1341,293 @@ c5_sweep_shutdown:
   return err;
 }
 
+/* First-pass 128x32 graphics demo. Provisional grid mapping after x=24:
+ * based on the repeating A/B/C vs D/E/F weave, NOT hardware verified.
+ * Deliberately separate from the legacy paired-grid framebuffer renderer.
+ * The automatic reel runs ~35 seconds, then blanks and powers down.
+ */
+#define MN_DEMO_WIDTH 128
+#define MN_DEMO_HEIGHT 32
+#define MN_DEMO_FRAME_BYTES 512
+
+static uint8_t mn_demo_fb[MN_DEMO_FRAME_BYTES];
+static uint8_t mn_demo_scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+static bool mn_demo_active[MN12832L_SCAN_COUNT];
+
+static void mn_demo_pixel(int x, int y) {
+  if (x < 0 || x >= MN_DEMO_WIDTH || y < 0 || y >= MN_DEMO_HEIGHT)
+    return;
+  mn_demo_fb[y * 16 + x / 8] |= (uint8_t)(0x80u >> (x & 7));
+}
+
+static void mn_demo_rect(int x, int y, int w, int h, bool filled) {
+  if (w <= 0 || h <= 0) return;
+  for (int yy = 0; yy < h; ++yy)
+    for (int xx = 0; xx < w; ++xx)
+      if (filled || xx == 0 || yy == 0 || xx == w - 1 || yy == h - 1)
+        mn_demo_pixel(x + xx, y + yy);
+}
+
+static void mn_demo_line(int x0, int y0, int x1, int y1) {
+  int dx = x1 > x0 ? x1 - x0 : x0 - x1;
+  int dy = y1 > y0 ? y1 - y0 : y0 - y1;
+  int sx = x0 < x1 ? 1 : -1;
+  int sy = y0 < y1 ? 1 : -1;
+  int err = dx - dy;
+  for (;;) {
+    mn_demo_pixel(x0, y0);
+    if (x0 == x1 && y0 == y1) break;
+    int twice = err * 2;
+    if (twice > -dy) { err -= dy; x0 += sx; }
+    if (twice < dx) { err += dx; y0 += sy; }
+  }
+}
+
+/* Minimal, explicitly authored 5x7 glyphs (5 low bits per row).
+ * Unknown glyphs render as blank. Font is intentionally simple so we can
+ * inspect physical column and row ordering without depending on LVGL.
+ */
+static void mn_demo_glyph(char c, uint8_t r[7]) {
+  static const uint8_t alpha[26][7] = {
+    {14,17,17,31,17,17,17}, /* A */
+    {30,17,17,30,17,17,30}, /* B */
+    {15,16,16,16,16,16,15}, /* C */
+    {30,17,17,17,17,17,30}, /* D */
+    {31,16,16,30,16,16,31}, /* E */
+    {31,16,16,30,16,16,16}, /* F */
+    {15,16,16,23,17,17,15}, /* G */
+    {17,17,17,31,17,17,17}, /* H */
+    {31,4,4,4,4,4,31}, /* I */
+    {7,2,2,2,18,18,12}, /* J */
+    {17,18,20,24,20,18,17}, /* K */
+    {16,16,16,16,16,16,31}, /* L */
+    {17,27,21,21,17,17,17}, /* M */
+    {17,25,21,19,17,17,17}, /* N */
+    {14,17,17,17,17,17,14}, /* O */
+    {30,17,17,30,16,16,16}, /* P */
+    {14,17,17,17,21,18,13}, /* Q */
+    {30,17,17,30,20,18,17}, /* R */
+    {15,16,16,14,1,1,30}, /* S */
+    {31,4,4,4,4,4,4}, /* T */
+    {17,17,17,17,17,17,14}, /* U */
+    {17,17,17,17,17,10,4}, /* V */
+    {17,17,17,21,21,21,10}, /* W */
+    {17,17,10,4,10,17,17}, /* X */
+    {17,17,10,4,4,4,4}, /* Y */
+    {31,1,2,4,8,16,31} /* Z */
+  };
+  static const uint8_t digits[10][7] = {
+    {14,17,19,21,25,17,14},
+    {4,12,4,4,4,4,14},
+    {14,17,1,2,4,8,31},
+    {30,1,1,14,1,1,30},
+    {2,6,10,18,31,2,2},
+    {31,16,30,1,1,17,14},
+    {6,8,16,30,17,17,14},
+    {31,1,2,4,8,8,8},
+    {14,17,17,14,17,17,14},
+    {14,17,17,15,1,2,12}
+  };
+  memset(r, 0, 7);
+  if (c >= 'a' && c <= 'z') c -= 32;
+  if (c >= 'A' && c <= 'Z')
+    memcpy(r, alpha[c - 'A'], 7);
+  else if (c >= '0' && c <= '9')
+    memcpy(r, digits[c - '0'], 7);
+  else if (c == '!') {
+    const uint8_t v[7] = {4,4,4,4,4,0,4};
+    memcpy(r, v, 7);
+  } else if (c == '-') {
+    r[3] = 31;
+  } else if (c == '.') {
+    r[6] = 4;
+  }
+}
+
+static void mn_demo_text(int x, int y, const char *s, int scale) {
+  if (scale < 1 || scale > 2) return;
+  while (*s) {
+    uint8_t glyph[7];
+    mn_demo_glyph(*s++, glyph);
+    for (int yy = 0; yy < 7; ++yy)
+      for (int xx = 0; xx < 5; ++xx)
+        if (glyph[yy] & (1u << (4 - xx)))
+          mn_demo_rect(x + xx * scale, y + yy * scale,
+                       scale, scale, true);
+    x += 6 * scale;
+  }
+}
+
+static void mn_demo_draw_scene(int scene, int64_t elapsed_us) {
+  memset(mn_demo_fb, 0, sizeof(mn_demo_fb));
+  if (scene == 0) {
+    mn_demo_text(3, 2, "HELLO VFD!", 2);
+    mn_demo_text(44, 21, "123", 1);
+  } else if (scene == 1) {
+    mn_demo_rect(1, 1, 126, 30, false);
+    mn_demo_line(5, 26, 37, 5);
+    mn_demo_rect(48, 5, 22, 20, false);
+    mn_demo_rect(82, 8, 13, 13, true);
+    mn_demo_line(105, 5, 122, 25);
+    mn_demo_line(122, 5, 105, 25);
+  } else if (scene == 2) {
+    /* Checkerboard, column markers, and X/Y edges reveal wrong mappings. */
+    for (int y = 1; y < 31; ++y)
+      for (int x = 0; x < 128; ++x)
+        if (((x / 4) + (y / 4)) % 2 == 0)
+          mn_demo_pixel(x, y);
+    mn_demo_line(0, 0, 127, 0);
+    mn_demo_line(0, 31, 127, 31);
+  } else if (scene == 3) {
+    int phase = (int)(elapsed_us / 90000);
+    int x = phase % 226;
+    if (x > 113) x = 226 - x;
+    mn_demo_rect(x, 10, 12, 12, false);
+    mn_demo_text(43, 2, "MOVE", 1);
+    mn_demo_line(0, 30, 127, 30);
+  } else if (scene == 4) {
+    int x = 128 - (int)(elapsed_us / 70000);
+    mn_demo_text(x, 12, "NORITAKE 128X32", 1);
+    mn_demo_line(0, 1, 127, 1);
+  } else {
+    mn_demo_text(34, 5, "END!", 2);
+  }
+}
+
+/* Use the first 24 *measured/provisional* choices verbatim, then extend
+ * the repeating grid/anode hypothesis to the remaining 104 columns.
+ * Group n=0 maps 1..3, group n=42 maps 127..128. Grid max is 44.
+ */
+static void mn_demo_map_column(int x, uint8_t *grid, char *anode) {
+  if (x < 24) {
+    *grid = mn12832l_first24_map[x].grid;
+    *anode = mn12832l_first24_map[x].anode;
+  } else {
+    int group = x / 3;
+    int phase = x % 3;
+    *grid = (uint8_t)(group + 1 + (phase != 0));
+    *anode = (group % 2 == 0) ? "ABC"[phase] : "DEF"[phase];
+  }
+}
+
+static void mn_demo_encode(void) {
+  memset(mn_demo_scans, 0, sizeof(mn_demo_scans));
+  memset(mn_demo_active, 0, sizeof(mn_demo_active));
+  for (int x = 0; x < MN_DEMO_WIDTH; ++x) {
+    uint8_t grid;
+    char anode;
+    mn_demo_map_column(x, &grid, &anode);
+    if (grid < 1 || grid > MN12832L_SCAN_COUNT) continue;
+    uint8_t *scan = mn_demo_scans[grid - 1];
+    for (int y = 0; y < MN_DEMO_HEIGHT; ++y) {
+      if ((mn_demo_fb[y * 16 + (x / 8)] &
+           (0x80u >> (x % 8))) == 0)
+        continue;
+      if (!mn_demo_active[grid - 1]) {
+        mn12832l_select_grid(scan, grid);
+        mn_demo_active[grid - 1] = true;
+      }
+      mn12832l_set_anode(scan, (uint8_t)(y + 1), anode);
+    }
+  }
+}
+
+esp_err_t mn12832l_spi_graphics_demo(void) {
+  enum {
+    SLOT_US = 250,
+    SCENE_US = 6000000,
+    ANIM_US = 9000000,
+    TOTAL_US = SCENE_US * 3 + ANIM_US * 2 + 4000000,
+    HARD_LIMIT_US = TOTAL_US + 3000000
+  };
+  static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
+  static const char *names[] = {
+      "HELLO VFD / 123", "shapes", "checkerboard",
+      "bouncing rectangle", "scrolling text", "END"
+  };
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) return err;
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("128x32 PROVISIONAL GRAPHICS REEL: 6 scenes, approximately 40s\n");
+  printf("X=1..24 partly characterized; X=25..128 inferred from weave.\n");
+  printf("No brightness compensation. 250us grid dwell. Press q to stop.\n");
+  printf("HV and EF automatically OFF at end. Supervise with power disconnect.\n");
+  fflush(stdout);
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+
+  int64_t start = esp_timer_get_time();
+  int64_t last_draw = -1000000;
+  int current_scene = -1;
+  bool completed = false;
+  for (;;) {
+    int64_t elapsed = esp_timer_get_time() - start;
+    if (elapsed >= HARD_LIMIT_US) {
+      err = ESP_ERR_TIMEOUT;
+      break;
+    }
+    int scene;
+    int64_t phase;
+    if (elapsed < SCENE_US) {
+      scene = 0; phase = elapsed;
+    } else if (elapsed < SCENE_US * 2) {
+      scene = 1; phase = elapsed - SCENE_US;
+    } else if (elapsed < SCENE_US * 3) {
+      scene = 2; phase = elapsed - SCENE_US * 2;
+    } else if (elapsed < SCENE_US * 3 + ANIM_US) {
+      scene = 3; phase = elapsed - SCENE_US * 3;
+    } else if (elapsed < SCENE_US * 3 + ANIM_US * 2) {
+      scene = 4; phase = elapsed - SCENE_US * 3 - ANIM_US;
+    } else if (elapsed < TOTAL_US) {
+      scene = 5; phase = elapsed - SCENE_US * 3 - ANIM_US * 2;
+    } else {
+      completed = true;
+      break;
+    }
+
+    if (scene != current_scene || elapsed - last_draw >= 100000) {
+      if (scene != current_scene) {
+        current_scene = scene;
+        printf("SCENE #%d/6: %s\n", scene + 1, names[scene]);
+        fflush(stdout);
+      }
+      mn_demo_draw_scene(scene, phase);
+      mn_demo_encode();
+      last_draw = elapsed;
+    }
+    for (int slot = 0; slot < MN12832L_SCAN_COUNT; ++slot) {
+      if (mn_demo_active[slot])
+        err = mn12832l_spi_scan_dwell(mn_demo_scans[slot], true, SLOT_US);
+      else {
+        err = mn12832l_spi_scan_dwell(blank, false, 0);
+        if (err == ESP_OK) esp_rom_delay_us(SLOT_US);
+      }
+      if (err != ESP_OK) goto mn_demo_shutdown;
+    }
+    vTaskDelay(1);
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') {
+        printf("Demo stopped by operator.\n");
+        goto mn_demo_shutdown;
+      }
+    }
+  }
+
+mn_demo_shutdown:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("Graphics reel %s; HV/EF OFF (status=%s)\n",
+         completed ? "completed" : "stopped", esp_err_to_name(err));
+  fflush(stdout);
+  return err;
+}
+
 /* Pixel-coordinate diagnostic: verify row ordering, single-pixel isolation,
  * and asymmetric shapes on independently validated columns 4,5,6.
  *
