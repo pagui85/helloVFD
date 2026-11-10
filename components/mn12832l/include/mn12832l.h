@@ -35,3 +35,4 @@ esp_err_t mn12832l_spi_three_column_grid_test(void);
 esp_err_t mn12832l_spi_group_independence_test(void);
 esp_err_t mn12832l_spi_pixel_coordinates_test(void);
 esp_err_t mn12832l_spi_column5_dwell_test(void);
+esp_err_t mn12832l_spi_c5_auto_sweep(void);
