@@ -649,61 +649,56 @@ static void mn12832l_manual_dump_transition(
   fflush(stdout);
 }
 
-/* Controlled A/B grid timing comparison. Both modes use two 30-byte SPI
- * transfers and 2 x 250 us dwell per logical scan:
- *   A: both grids ON for 250 us; second phase is blank for 250 us.
- *   B: Gx ON for 250 us, followed by Gx+1 ON for 250 us.
- * Thus each grid receives 250 us per frame in either mode, and refresh
- * overhead is comparable. The combined electrical load is intentionally
- * different (paired versus isolated grids). This is still an experiment.
- * Scan 0 has only G1 and receives an identical blank second phase in B.
+/* A/B/C/D grid-phase diagnostic. All modes do two SPI transfers per scan
+ * with two 250us slots:
+ * A = paired grids / blank
+ * B = previous grid / next grid
+ * C = previous grid / blank
+ * D = next grid / blank.
+ * For scan 0, only G1 exists: B and D select G1, C stays blank.
+ * C/D are intentionally less luminous than B; compare position first.
  */
 static esp_err_t mn12832l_manual_timed_scan(
-    const uint8_t frame[MN12832L_FRAME_BYTES], int scan,
-    bool split_grids) {
+    const uint8_t frame[MN12832L_FRAME_BYTES], int scan, char mode) {
   enum { PHASE_US = 250 };
   static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
   esp_err_t err;
-
-  if (!split_grids) {
+  if (mode == 'A') {
     err = mn12832l_spi_scan_dwell(frame, true, PHASE_US);
-    if (err != ESP_OK) {
-      return err;
-    }
-    /* Dummy transfer matches the second SPI transaction in mode B.
-     * Keep BLK asserted throughout the off-phase. */
+    if (err != ESP_OK) return err;
     err = mn12832l_spi_scan_dwell(blank, false, 0);
-    if (err != ESP_OK) {
-      return err;
-    }
+    if (err != ESP_OK) return err;
     esp_rom_delay_us(PHASE_US);
     return ESP_OK;
   }
 
+  if (mode != 'B' && mode != 'C' && mode != 'D') {
+    return ESP_ERR_INVALID_ARG;
+  }
   uint8_t isolated[MN12832L_FRAME_BYTES];
   memcpy(isolated, frame, sizeof(isolated));
   memset(isolated + 24, 0, 6);
-  mn12832l_select_grid(isolated, (uint8_t)(scan + 1));
-  if (scan > 0) {
-    /* Match the Gx then Gx+1 ordering of the prior experimental mode. */
-    memset(isolated + 24, 0, 6);
+  bool first_active = false;
+  if (mode == 'D' || (mode == 'B' && scan == 0)) {
+    mn12832l_select_grid(isolated, (uint8_t)(scan + 1));
+    first_active = true;
+  } else if (scan > 0) {
     mn12832l_select_grid(isolated, (uint8_t)scan);
+    first_active = true;
   }
-  err = mn12832l_spi_scan_dwell(isolated, true, PHASE_US);
-  if (err != ESP_OK) {
-    return err;
+
+  err = mn12832l_spi_scan_dwell(isolated, first_active, PHASE_US);
+  if (err != ESP_OK) return err;
+
+  if (mode == 'B' && scan > 0) {
+    memset(isolated + 24, 0, 6);
+    mn12832l_select_grid(isolated, (uint8_t)(scan + 1));
+    return mn12832l_spi_scan_dwell(isolated, true, PHASE_US);
   }
-  if (scan == 0) {
-    err = mn12832l_spi_scan_dwell(blank, false, 0);
-    if (err != ESP_OK) {
-      return err;
-    }
-    esp_rom_delay_us(PHASE_US);
-    return ESP_OK;
-  }
-  memset(isolated + 24, 0, 6);
-  mn12832l_select_grid(isolated, (uint8_t)(scan + 1));
-  return mn12832l_spi_scan_dwell(isolated, true, PHASE_US);
+  err = mn12832l_spi_scan_dwell(blank, false, 0);
+  if (err != ESP_OK) return err;
+  esp_rom_delay_us(PHASE_US);
+  return ESP_OK;
 }
 
 /* Independent single-column A/B comparison for logical columns 4..9.
@@ -732,7 +727,7 @@ esp_err_t mn12832l_spi_single_column_ab_test(void) {
   static uint8_t framebuffer[128 * 32 / 8];
   static uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
   int selected_column = FIRST_COLUMN; // One-based human-readable column.
-  bool split_grids = false;
+  char grid_mode = 'A';
   uint32_t measured_frames = 0;
   int64_t measurement_start = 0;
   int64_t on_start = 0;
@@ -749,10 +744,10 @@ esp_err_t mn12832l_spi_single_column_ab_test(void) {
   }
   mn12832l_encode_frame(framebuffer, scans);
 
-  printf("MN12832L single-column A/B: columns 4..9, Y=8..23\n");
+  printf("MN12832L single-column A/B/C/D: columns 4..9, Y=8..23\n");
   printf("Keys: 4..9=select only that column; n=next; p=previous; "
-         "0=blank; a=paired; b=split; q=quit\n");
-  printf("A: paired 250us + blank 250us, B: Gx then Gx+1 250us each.\n");
+         "0=blank; a=paired; b=split; c=Gx; d=Gx+1; q=quit\n");
+  printf("A=paired/blank, B=Gx/Gx+1, C=Gx/blank, D=Gx+1/blank.\n");
   printf("Auto-off: 30s without command, 120s maximum HV-on.\n");
   fflush(stdout);
 
@@ -774,7 +769,7 @@ esp_err_t mn12832l_spi_single_column_ab_test(void) {
     }
 
     for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
-      err = mn12832l_manual_timed_scan(scans[scan], scan, split_grids);
+      err = mn12832l_manual_timed_scan(scans[scan], scan, grid_mode);
       if (err != ESP_OK) {
         goto shutdown_single_ab;
       }
@@ -786,7 +781,7 @@ esp_err_t mn12832l_spi_single_column_ab_test(void) {
     int64_t measure_now = esp_timer_get_time();
     if (measure_now - measurement_start >= 2000000) {
       printf("REFRESH MODE %c COLUMN %d: %.2f frames/s\n",
-             split_grids ? 'B' : 'A', selected_column,
+             grid_mode, selected_column,
              (double)measured_frames * 1000000.0 /
                  (double)(measure_now - measurement_start));
       fflush(stdout);
@@ -800,14 +795,15 @@ esp_err_t mn12832l_spi_single_column_ab_test(void) {
         printf("Quit requested.\n");
         goto shutdown_single_ab;
       }
-      if (key == 'a' || key == 'A' || key == 'b' || key == 'B') {
-        split_grids = (key == 'b' || key == 'B');
+      if (key == 'a' || key == 'A' || key == 'b' || key == 'B' ||
+          key == 'c' || key == 'C' || key == 'd' || key == 'D') {
+        grid_mode = (key >= 'a' && key <= 'z') ? key - ('a' - 'A') : key;
         last_input = esp_timer_get_time();
         measurement_start = last_input;
         measured_frames = 0;
         gpio_set_level(PIN_BLK, 1);
         printf("MODE %c, COLUMN %d ONLY\n",
-               split_grids ? 'B' : 'A', selected_column);
+               grid_mode, selected_column);
         fflush(stdout);
         break;
       }
@@ -842,7 +838,7 @@ esp_err_t mn12832l_spi_single_column_ab_test(void) {
       }
       mn12832l_encode_frame(framebuffer, scans);
       printf("SELECTED COLUMN %d ONLY, MODE %c; x=%d\n",
-             selected_column, split_grids ? 'B' : 'A',
+             selected_column, grid_mode,
              selected_column == 0 ? -1 : selected_column - 1);
       fflush(stdout);
       break;
@@ -853,7 +849,7 @@ shutdown_single_ab:
   gpio_set_level(PIN_BLK, 1);
   gpio_set_level(PIN_HV, 0);
   gpio_set_level(PIN_EF, 0);
-  printf("MN12832L single-column A/B complete: %s\n", esp_err_to_name(err));
+  printf("MN12832L single-column A/B/C/D complete: %s\n", esp_err_to_name(err));
   return err;
 }
 
@@ -885,7 +881,7 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
   static uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
   static uint8_t old_scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
   int lit_columns = 1;
-  bool split_grids = false;  /* Mode A by default. */
+  char grid_mode = 'A';  /* Mode A by default. */
   uint32_t measured_frames = 0;
   int64_t measurement_start = 0;
   int64_t on_start = 0;
@@ -905,9 +901,9 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
   mn12832l_encode_frame(framebuffer, scans);
 
   printf("MN12832L manual fill: X=0..15, Y=8..23.\n");
-  printf("SPACE=add column; a=paired grids; b=split grids; q=quit.\n");
+  printf("SPACE=add column; a=paired; b=split; c=Gx; d=Gx+1; q=quit.\n");
   printf("MODE A: paired 250us, then blank 250us (2 SPI transfers).\n");
-  printf("MODE B: individual grids 250us each (2 SPI transfers).\n");
+  printf("MODE B: Gx/Gx+1. Modes C/D: one grid then blank; 250us/phase.\n");
   printf("Mode-matched timing; 2s measured refresh-rate reports.\n");
   printf("After column 16, another SPACE ends the test.\n");
   printf("Auto-off: 30 seconds idle or 120 seconds total HV-on.\n");
@@ -936,7 +932,7 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
     /* Refresh the full scan continuously, never wait for keyboard
      * input with the currently selected grid held unblanked. */
     for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
-      err = mn12832l_manual_timed_scan(scans[scan], scan, split_grids);
+      err = mn12832l_manual_timed_scan(scans[scan], scan, grid_mode);
       if (err != ESP_OK) {
         goto shutdown_manual_fill;
       }
@@ -952,7 +948,7 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
     int64_t measure_now = esp_timer_get_time();
     if (measure_now - measurement_start >= 2000000) {
       printf("REFRESH MODE %c: %.2f frames/s (%lu frames in %lld ms)\n",
-             split_grids ? 'B' : 'A',
+             grid_mode,
              (double)measured_frames * 1000000.0 /
                  (double)(measure_now - measurement_start),
              (unsigned long)measured_frames,
@@ -971,16 +967,18 @@ esp_err_t mn12832l_spi_manual_fill_test(void) {
         finished = true;
         break;
       }
-      if (key == 'a' || key == 'A' || key == 'b' || key == 'B') {
-        split_grids = (key == 'b' || key == 'B');
+      if (key == 'a' || key == 'A' || key == 'b' || key == 'B' ||
+          key == 'c' || key == 'C' || key == 'd' || key == 'D') {
+        grid_mode = (key >= 'a' && key <= 'z') ? key - ('a' - 'A') : key;
         last_input = esp_timer_get_time();
         measured_frames = 0;
         measurement_start = last_input;
         gpio_set_level(PIN_BLK, 1);
         printf("MODE %c ACTIVE, COLUMN %d/16: %s\n",
-               split_grids ? 'B' : 'A', lit_columns,
-               split_grids ? "Gx then Gx+1, 250us each"
-                           : "paired 250us, blank 250us");
+               grid_mode, lit_columns,
+               grid_mode == 'A' ? "paired/blank" :
+               grid_mode == 'B' ? "Gx/Gx+1" :
+               grid_mode == 'C' ? "Gx only" : "Gx+1 only");
         fflush(stdout);
         break;
       }
