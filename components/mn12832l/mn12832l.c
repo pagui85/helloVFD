@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "mn12832l.h"
 
@@ -588,6 +589,121 @@ shutdown_cumulative:
   printf("MN12832L cumulative fill complete: %lld ms, status=%s\n",
          (long long)((esp_timer_get_time() - run_start) / 1000),
          esp_err_to_name(err));
+  return err;
+}
+
+/* Manual 8-column cumulative fill for frame-by-frame observations.
+ * Send a space through the primary ESP-IDF serial console to add a column;
+ * 'q' exits. The displayed frame is continuously multiplexed even while
+ * waiting for input, with a global and idle timeout for supervised operation.
+ *
+ * Uses raw POSIX read rather than getchar() so a space need not be followed
+ * by Enter on the ESP32 console. The host terminal must transmit keystrokes
+ * immediately (idf.py monitor normally does).
+ */
+esp_err_t mn12832l_spi_manual_fill_test(void) {
+  enum {
+    WIDTH = 8,
+    STRIP_Y_START = 8,
+    STRIP_Y_END = 24,
+    MAX_ON_US = 120000000,
+    MAX_IDLE_US = 30000000
+  };
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  uint8_t framebuffer[128 * 32 / 8];
+  uint8_t scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
+  int lit_columns = 1;
+  int64_t on_start = 0;
+  int64_t last_input = 0;
+  bool finished = false;
+
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+
+  /* First column: draw a 16-row vertical segment.
+   * Each subsequent space adds a column to the RIGHT. */
+  memset(framebuffer, 0xFF, sizeof(framebuffer));
+  for (int y = STRIP_Y_START; y < STRIP_Y_END; ++y) {
+    framebuffer[y * 16] &= (uint8_t)~0x80u;
+  }
+  mn12832l_encode_frame(framebuffer, scans);
+
+  printf("MN12832L manual fill: X=0..7, Y=8..23.\n");
+  printf("Press SPACE once for each next column, q to quit.\n");
+  printf("After column 8, another SPACE ends the test.\n");
+  printf("Auto-off: 30 seconds idle or 120 seconds total HV-on.\n");
+  fflush(stdout);
+
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  on_start = esp_timer_get_time();
+  last_input = on_start;
+  printf("COLUMN 1/8: logical X=0 lit\n");
+  fflush(stdout);
+
+  while (!finished) {
+    int64_t now = esp_timer_get_time();
+    if (now - on_start >= MAX_ON_US ||
+        now - last_input >= MAX_IDLE_US) {
+      printf("Manual fill timeout; shutting down.\n");
+      err = ESP_ERR_TIMEOUT;
+      break;
+    }
+
+    /* Refresh the full scan continuously, never wait for keyboard
+     * input with the currently selected grid held unblanked. */
+    for (int scan = 0; scan < MN12832L_SCAN_COUNT; ++scan) {
+      err = mn12832l_spi_scan(scans[scan], true);
+      if (err != ESP_OK) {
+        goto shutdown_manual_fill;
+      }
+    }
+
+    /* The default ESP-IDF console VFS is non-blocking. Direct read
+     * bypasses stdio's newline-oriented input buffering. */
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') {
+        printf("Quit requested.\n");
+        finished = true;
+        break;
+      }
+      if (key != ' ') {
+        continue;
+      }
+      last_input = esp_timer_get_time();
+      if (lit_columns >= WIDTH) {
+        finished = true;
+        break;
+      }
+      int x = lit_columns;
+      for (int y = STRIP_Y_START; y < STRIP_Y_END; ++y) {
+        framebuffer[y * 16 + x / 8] &=
+            (uint8_t)~(0x80u >> (x % 8));
+      }
+      ++lit_columns;
+      mn12832l_encode_frame(framebuffer, scans);
+      printf("COLUMN %d/%d: logical X=0..%d lit\n",
+             lit_columns, WIDTH, lit_columns - 1);
+      fflush(stdout);
+      /* Only one advance per refresh cycle even if the console
+       * delivers multiple spaces; prevents accidental rapid skipping. */
+      break;
+    }
+  }
+
+shutdown_manual_fill:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("MN12832L manual fill ended at %d columns: %s\n",
+         lit_columns, esp_err_to_name(err));
   return err;
 }
 
