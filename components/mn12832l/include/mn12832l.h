@@ -38,3 +38,4 @@ esp_err_t mn12832l_spi_column5_dwell_test(void);
 esp_err_t mn12832l_spi_c5_auto_sweep(void);
 /* Experimental full-width graphics reel; mapping after column 24 is inferred. */
 esp_err_t mn12832l_spi_graphics_demo(void);
+esp_err_t mn12832l_spi_documented_pair_ab_test(void);
