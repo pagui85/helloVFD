@@ -1341,18 +1341,19 @@ c5_sweep_shutdown:
   return err;
 }
 
-/* First-pass 128x32 graphics demo. Provisional grid mapping after x=24:
- * based on the repeating A/B/C vs D/E/F weave, NOT hardware verified.
- * Deliberately separate from the legacy paired-grid framebuffer renderer.
- * The automatic reel runs ~35 seconds, then blanks and powers down.
+/* Manufacturer-documented 128x32 paired-grid graphics demo.
+ * The automatic reel runs 40 seconds, then blanks and powers down.
+ * Existing SPI transport and diagnostic dwell are retained for comparison.
+ * Full-width visual verification and production timing are still pending.
  */
 #define MN_DEMO_WIDTH 128
 #define MN_DEMO_HEIGHT 32
 #define MN_DEMO_FRAME_BYTES 512
+#define MN_DEMO_SCAN_COUNT 43
 
 static uint8_t mn_demo_fb[MN_DEMO_FRAME_BYTES];
-static uint8_t mn_demo_scans[MN12832L_SCAN_COUNT][MN12832L_FRAME_BYTES];
-static bool mn_demo_active[MN12832L_SCAN_COUNT];
+static uint8_t mn_demo_scans[MN_DEMO_SCAN_COUNT][MN12832L_FRAME_BYTES];
+static bool mn_demo_active[MN_DEMO_SCAN_COUNT];
 
 static void mn_demo_pixel(int x, int y) {
   if (x < 0 || x >= MN_DEMO_WIDTH || y < 0 || y >= MN_DEMO_HEIGHT)
@@ -1494,40 +1495,32 @@ static void mn_demo_draw_scene(int scene, int64_t elapsed_us) {
   }
 }
 
-/* Use the first 24 *measured/provisional* choices verbatim, then extend
- * the repeating grid/anode hypothesis to the remaining 104 columns.
- * Group n=0 maps 1..3, group n=42 maps 127..128. Grid max is 44.
+/* Datasheet scan T1..T43: group n (zero-based) drives G(n+1)
+ * and G(n+2) together, with ABC on even groups and DEF on odd.
+ * The final group has only columns 127 and 128; C remains off.
+ * Framebuffer is MSB-first, one bit per pixel, 1 = illuminated.
+ * Keep historical single-grid diagnostics independent of this encoder.
  */
-static void mn_demo_map_column(int x, uint8_t *grid, char *anode) {
-  if (x < 24) {
-    *grid = mn12832l_first24_map[x].grid;
-    *anode = mn12832l_first24_map[x].anode;
-  } else {
-    int group = x / 3;
-    int phase = x % 3;
-    *grid = (uint8_t)(group + 1 + (phase != 0));
-    *anode = (group % 2 == 0) ? "ABC"[phase] : "DEF"[phase];
-  }
-}
-
 static void mn_demo_encode(void) {
   memset(mn_demo_scans, 0, sizeof(mn_demo_scans));
   memset(mn_demo_active, 0, sizeof(mn_demo_active));
-  for (int x = 0; x < MN_DEMO_WIDTH; ++x) {
-    uint8_t grid;
-    char anode;
-    mn_demo_map_column(x, &grid, &anode);
-    if (grid < 1 || grid > MN12832L_SCAN_COUNT) continue;
-    uint8_t *scan = mn_demo_scans[grid - 1];
-    for (int y = 0; y < MN_DEMO_HEIGHT; ++y) {
-      if ((mn_demo_fb[y * 16 + (x / 8)] &
-           (0x80u >> (x % 8))) == 0)
-        continue;
-      if (!mn_demo_active[grid - 1]) {
-        mn12832l_select_grid(scan, grid);
-        mn_demo_active[grid - 1] = true;
+  for (int slot = 0; slot < MN_DEMO_SCAN_COUNT; ++slot) {
+    uint8_t *scan = mn_demo_scans[slot];
+    const char *anodes = (slot % 2 == 0) ? "ABC" : "DEF";
+    for (int phase = 0; phase < 3; ++phase) {
+      int x = slot * 3 + phase;
+      if (x >= MN_DEMO_WIDTH) break;
+      for (int y = 0; y < MN_DEMO_HEIGHT; ++y) {
+        if ((mn_demo_fb[y * 16 + x / 8] &
+             (0x80u >> (x & 7))) == 0)
+          continue;
+        if (!mn_demo_active[slot]) {
+          mn12832l_select_grid(scan, (uint8_t)(slot + 1));
+          mn12832l_select_grid(scan, (uint8_t)(slot + 2));
+          mn_demo_active[slot] = true;
+        }
+        mn12832l_set_anode(scan, (uint8_t)(y + 1), anodes[phase]);
       }
-      mn12832l_set_anode(scan, (uint8_t)(y + 1), anode);
     }
   }
 }
@@ -1551,8 +1544,8 @@ esp_err_t mn12832l_spi_graphics_demo(void) {
   gpio_set_level(PIN_BLK, 1);
   gpio_set_level(PIN_HV, 0);
   gpio_set_level(PIN_EF, 0);
-  printf("128x32 PROVISIONAL GRAPHICS REEL: 6 scenes, approximately 40s\n");
-  printf("X=1..24 partly characterized; X=25..128 inferred from weave.\n");
+  printf("128x32 PAIRED-GRID GRAPHICS REEL: 6 scenes, approximately 40s\n");
+  printf("43 scan steps: adjacent grid pairs, alternating ABC/DEF; final AB.\n");
   printf("No brightness compensation. 250us grid dwell. Press q to stop.\n");
   printf("HV and EF automatically OFF at end. Supervise with power disconnect.\n");
   fflush(stdout);
@@ -1599,7 +1592,7 @@ esp_err_t mn12832l_spi_graphics_demo(void) {
       mn_demo_encode();
       last_draw = elapsed;
     }
-    for (int slot = 0; slot < MN12832L_SCAN_COUNT; ++slot) {
+    for (int slot = 0; slot < MN_DEMO_SCAN_COUNT; ++slot) {
       if (mn_demo_active[slot])
         err = mn12832l_spi_scan_dwell(mn_demo_scans[slot], true, SLOT_US);
       else {
