@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stdint.h>
 
 esp_err_t mn12832l_init(void);
 esp_err_t mn12832l_run_diagnostic(void);
@@ -14,3 +15,27 @@ void mn12832l_test_illumination(const uint8_t *framebuffer);
 void mn12832l_test_power(void);
 void mn12832l_test_blank_polarity(void);
 void mn12832l_test_sweep(void);
+/* Hardware-SPI transport tests. The illumination test powers down on return. */
+esp_err_t mn12832l_spi_dry_run(const uint8_t *framebuffer);
+esp_err_t mn12832l_spi_illumination_test(const uint8_t *framebuffer);
+esp_err_t mn12832l_spi_phase_shift_test(const uint8_t *framebuffer);
+esp_err_t mn12832l_spi_column_walk(void);
+esp_err_t mn12832l_spi_grid_walk(void);
+esp_err_t mn12832l_spi_anode_walk(void);
+esp_err_t mn12832l_spi_grid_pair_test(void);
+esp_err_t mn12832l_spi_cumulative_fill_test(void);
+esp_err_t mn12832l_spi_manual_fill_test(void);
+esp_err_t mn12832l_spi_single_column_ab_test(void);
+esp_err_t mn12832l_spi_overlap_pattern_test(void);
+esp_err_t mn12832l_spi_electrode_map_test(void);
+esp_err_t mn12832l_spi_brightness_comparison_test(void);
+esp_err_t mn12832l_spi_first24_corrected_test(void);
+esp_err_t mn12832l_spi_missing_columns_test(void);
+esp_err_t mn12832l_spi_three_column_grid_test(void);
+esp_err_t mn12832l_spi_group_independence_test(void);
+esp_err_t mn12832l_spi_pixel_coordinates_test(void);
+esp_err_t mn12832l_spi_column5_dwell_test(void);
+esp_err_t mn12832l_spi_c5_auto_sweep(void);
+/* Bounded full-width graphics reel using documented 43-step paired grids. */
+esp_err_t mn12832l_spi_graphics_demo(void);
+esp_err_t mn12832l_spi_documented_pair_ab_test(void);

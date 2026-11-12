@@ -81,17 +81,31 @@ void app_main(void) {
   //   }
 
   ESP_ERROR_CHECK(mn12832l_init());
-  //   mn12832l_test_blank_polarity();
-  //   mn12832l_test_power();
-  //   mn12832l_test_illumination(frame);
-  mn12832l_test_sweep();
 
-  // mn12832l_test_illumination(test_frame);
-  //   ESP_ERROR_CHECK(mn12832l_run_diagnostic());
-  //   ESP_ERROR_CHECK(mn12832l_dry_run());
-  //   mn12832l_test_grid_encoder();
-  //   mn12832l_test_anode_encoder();
-  //   mn12832l_test_scan_encoder();
-  //   mn12832l_test_full_frame();
-  //   mn12832l_test_refresh(vfd_framebuffer_get());
+  // SPI owns the SIN/CLK pins after this point. Run any GPIO bit-bang
+  // diagnostics BEFORE the first SPI call, never concurrently with it.
+  ESP_ERROR_CHECK(mn12832l_spi_dry_run(frame));
+
+  // Supervised bounded graphics reel using the documented grid pairs.
+  ESP_ERROR_CHECK(mn12832l_spi_graphics_demo());
+  // ESP_ERROR_CHECK(mn12832l_spi_documented_pair_ab_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_c5_auto_sweep());
+  // ESP_ERROR_CHECK(mn12832l_spi_column5_dwell_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_pixel_coordinates_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_group_independence_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_three_column_grid_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_first24_corrected_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_missing_columns_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_brightness_comparison_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_electrode_map_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_overlap_pattern_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_single_column_ab_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_manual_fill_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_cumulative_fill_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_grid_pair_test());
+  // ESP_ERROR_CHECK(mn12832l_spi_anode_walk());
+  // ESP_ERROR_CHECK(mn12832l_spi_phase_shift_test(frame));
+  // ESP_ERROR_CHECK(mn12832l_spi_grid_walk());
+  // ESP_ERROR_CHECK(mn12832l_spi_column_walk());
+  // ESP_ERROR_CHECK(mn12832l_spi_illumination_test(frame));
 }
