@@ -1343,8 +1343,8 @@ c5_sweep_shutdown:
 
 /* Manufacturer-documented 128x32 paired-grid graphics demo.
  * The automatic reel runs 40 seconds, then blanks and powers down.
- * Existing SPI transport and diagnostic dwell are retained for comparison.
- * Full-width visual verification and production timing are still pending.
+ * Full-width mapping visually validated; pipelined refresh is experimental.
+ * Existing SPI transport and bounded supervised power sequence retained.
  */
 #define MN_DEMO_WIDTH 128
 #define MN_DEMO_HEIGHT 32
@@ -1525,15 +1525,52 @@ static void mn_demo_encode(void) {
   }
 }
 
+/* Pipeline one complete 43-pair frame. All scene rendering, logging and
+ * task yielding occur with BLK asserted. Shift the next pair during the
+ * current pair's dwell; latch only after blanking. No timing catch-up.
+ * Reference STM32-style guard delays are retained around LAT.
+ * The active-time limit is a software observation, not a hardware interlock.
+ */
+static esp_err_t mn_demo_pipeline_frame(uint32_t *max_active_us,
+                                         uint32_t *overruns) {
+  enum { ACTIVE_US = 155, MAX_ACTIVE_US = 250 };
+  gpio_set_level(PIN_BLK, 1);
+  esp_err_t err = mn12832l_spi_shift(mn_demo_scans[0]);
+  if (err != ESP_OK) return err;
+  for (int slot = 0; slot < MN_DEMO_SCAN_COUNT; ++slot) {
+    gpio_set_level(PIN_BLK, 1);
+    esp_rom_delay_us(17);
+    gpio_set_level(PIN_LAT, 1);
+    esp_rom_delay_us(3);
+    gpio_set_level(PIN_LAT, 0);
+    esp_rom_delay_us(13);
+
+    const int64_t start = esp_timer_get_time();
+    if (mn_demo_active[slot]) gpio_set_level(PIN_BLK, 0);
+    if (slot + 1 < MN_DEMO_SCAN_COUNT)
+      err = mn12832l_spi_shift(mn_demo_scans[slot + 1]);
+    int64_t used = esp_timer_get_time() - start;
+    if (err == ESP_OK && used < ACTIVE_US)
+      esp_rom_delay_us((uint32_t)(ACTIVE_US - used));
+    gpio_set_level(PIN_BLK, 1);
+    used = esp_timer_get_time() - start;
+    if (err != ESP_OK) return err;
+    if (mn_demo_active[slot]) {
+      if (used > *max_active_us) *max_active_us = (uint32_t)used;
+      if (used > ACTIVE_US + 10) ++*overruns;
+      if (used > MAX_ACTIVE_US) return ESP_ERR_TIMEOUT;
+    }
+  }
+  return ESP_OK;
+}
+
 esp_err_t mn12832l_spi_graphics_demo(void) {
   enum {
-    SLOT_US = 250,
     SCENE_US = 6000000,
     ANIM_US = 9000000,
     TOTAL_US = SCENE_US * 3 + ANIM_US * 2 + 4000000,
     HARD_LIMIT_US = TOTAL_US + 3000000
   };
-  static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
   static const char *names[] = {
       "HELLO VFD / 123", "shapes", "checkerboard",
       "bouncing rectangle", "scrolling text", "END"
@@ -1544,9 +1581,9 @@ esp_err_t mn12832l_spi_graphics_demo(void) {
   gpio_set_level(PIN_BLK, 1);
   gpio_set_level(PIN_HV, 0);
   gpio_set_level(PIN_EF, 0);
-  printf("128x32 PAIRED-GRID GRAPHICS REEL: 6 scenes, approximately 40s\n");
+  printf("128x32 PIPELINED PAIRED-GRID GRAPHICS REEL: 6 scenes, approximately 40s\n");
   printf("43 scan steps: adjacent grid pairs, alternating ABC/DEF; final AB.\n");
-  printf("No brightness compensation. 250us grid dwell. Press q to stop.\n");
+  printf("Pipelined SPI: 155us target active, 17/3/13us latch guards. q=stop.\n");
   printf("HV and EF automatically OFF at end. Supervise with power disconnect.\n");
   fflush(stdout);
   gpio_set_level(PIN_EF, 1);
@@ -1557,6 +1594,8 @@ esp_err_t mn12832l_spi_graphics_demo(void) {
   int64_t last_draw = -1000000;
   int current_scene = -1;
   bool completed = false;
+  uint32_t frames = 0, max_active_us = 0, overruns = 0;
+  int64_t stats_start = start;
   for (;;) {
     int64_t elapsed = esp_timer_get_time() - start;
     if (elapsed >= HARD_LIMIT_US) {
@@ -1592,16 +1631,19 @@ esp_err_t mn12832l_spi_graphics_demo(void) {
       mn_demo_encode();
       last_draw = elapsed;
     }
-    for (int slot = 0; slot < MN_DEMO_SCAN_COUNT; ++slot) {
-      if (mn_demo_active[slot])
-        err = mn12832l_spi_scan_dwell(mn_demo_scans[slot], true, SLOT_US);
-      else {
-        err = mn12832l_spi_scan_dwell(blank, false, 0);
-        if (err == ESP_OK) esp_rom_delay_us(SLOT_US);
-      }
-      if (err != ESP_OK) goto mn_demo_shutdown;
+    err = mn_demo_pipeline_frame(&max_active_us, &overruns);
+    if (err != ESP_OK) goto mn_demo_shutdown;
+    ++frames;
+    vTaskDelay(1); /* 1ms tick; always blanked while yielding. */
+    int64_t stats_now = esp_timer_get_time();
+    if (stats_now - stats_start >= 2000000) {
+      printf("REFRESH: %.1f Hz, max active %lu us, late slots %lu\n",
+             (double)frames * 1000000.0 / (double)(stats_now - stats_start),
+             (unsigned long)max_active_us, (unsigned long)overruns);
+      fflush(stdout);
+      stats_start = stats_now;
+      frames = max_active_us = overruns = 0;
     }
-    vTaskDelay(1);
     char key;
     while (read(STDIN_FILENO, &key, 1) == 1) {
       if (key == 'q' || key == 'Q') {
