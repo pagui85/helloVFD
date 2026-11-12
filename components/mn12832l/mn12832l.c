@@ -1628,6 +1628,116 @@ mn_demo_shutdown:
   return err;
 }
 
+/* Compare the supplier's documented T2 (G2+G3, D/E/F) with our
+ * measured single-grid assignments. Keep the established SPI transport,
+ * 44-slot test cadence and 250us illumination identical in every mode.
+ * This is NOT the production timing specified in the datasheet.
+ * No other anodes or grid pairs are driven; use attended bench operation.
+ */
+esp_err_t mn12832l_spi_documented_pair_ab_test(void) {
+  enum { SLOT_US = 250, IDLE_US = 60000000,
+         LIMIT_US = 120000000 };
+  static const uint8_t blank[MN12832L_FRAME_BYTES] = {0};
+  uint8_t c4[MN12832L_FRAME_BYTES] = {0};
+  uint8_t c56[MN12832L_FRAME_BYTES] = {0};
+  uint8_t paired456[MN12832L_FRAME_BYTES] = {0};
+  uint8_t c5[MN12832L_FRAME_BYTES] = {0};
+  uint8_t paired5[MN12832L_FRAME_BYTES] = {0};
+
+  mn12832l_select_grid(c4, 2);
+  mn12832l_select_grid(c56, 3);
+  mn12832l_select_grid(c5, 3);
+  mn12832l_select_grid(paired456, 2);
+  mn12832l_select_grid(paired456, 3);
+  mn12832l_select_grid(paired5, 2);
+  mn12832l_select_grid(paired5, 3);
+  for (int row = 9; row <= 24; ++row) {
+    mn12832l_set_anode(c4, (uint8_t)row, 'D');
+    mn12832l_set_anode(c56, (uint8_t)row, 'E');
+    mn12832l_set_anode(c56, (uint8_t)row, 'F');
+    mn12832l_set_anode(c5, (uint8_t)row, 'E');
+    mn12832l_set_anode(paired456, (uint8_t)row, 'D');
+    mn12832l_set_anode(paired456, (uint8_t)row, 'E');
+    mn12832l_set_anode(paired456, (uint8_t)row, 'F');
+    mn12832l_set_anode(paired5, (uint8_t)row, 'E');
+  }
+
+  static const char *labels[] = {
+      "blank",
+      "C4+C5+C6 single grids G2/D and G3/E,F",
+      "C4+C5+C6 paired G2+G3/D,E,F (documented T2)",
+      "C5 only G3/E",
+      "C5 only paired G2+G3/E (documented T2)"
+  };
+  esp_err_t err = mn12832l_spi_init();
+  if (err != ESP_OK) return err;
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("DOCUMENTED GRID PAIR A/B: C4,C5,C6 (16-row stripes)\n");
+  printf("1=single grids, 2=paired grids, 3=C5 single, 4=C5 pair\n");
+  printf("0=blank, q=quit. 250us active dwell; 44-slot fixed test cadence.\n");
+  printf("One minute inactivity / two minutes maximum HV; attended only.\n");
+  fflush(stdout);
+  gpio_set_level(PIN_EF, 1);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  gpio_set_level(PIN_HV, 1);
+  int selected = 1;
+  const int64_t start = esp_timer_get_time();
+  int64_t last_input = start;
+  printf("TEST #1: %s\n", labels[selected]);
+  fflush(stdout);
+
+  for (;;) {
+    int64_t now = esp_timer_get_time();
+    if (now - start >= LIMIT_US || now - last_input >= IDLE_US) {
+      printf("Test time limit reached; powering down.\n");
+      break;
+    }
+    for (int slot = 0; slot < MN12832L_SCAN_COUNT; ++slot) {
+      const uint8_t *active = NULL;
+      if (selected == 1) {
+        if (slot == 1) active = c4;
+        else if (slot == 2) active = c56;
+      } else if (selected == 2 && slot == 1) {
+        active = paired456;
+      } else if (selected == 3 && slot == 2) {
+        active = c5;
+      } else if (selected == 4 && slot == 2) {
+        active = paired5;
+      }
+
+      if (active != NULL)
+        err = mn12832l_spi_scan_dwell(active, true, SLOT_US);
+      else {
+        err = mn12832l_spi_scan_dwell(blank, false, 0);
+        if (err == ESP_OK) esp_rom_delay_us(SLOT_US);
+      }
+      if (err != ESP_OK) goto documented_pair_shutdown;
+    }
+    vTaskDelay(1);
+    char key;
+    while (read(STDIN_FILENO, &key, 1) == 1) {
+      if (key == 'q' || key == 'Q') goto documented_pair_shutdown;
+      if (key < '0' || key > '4') continue;
+      gpio_set_level(PIN_BLK, 1);
+      selected = key - '0';
+      last_input = esp_timer_get_time();
+      printf("TEST #%d: %s\n", selected, labels[selected]);
+      fflush(stdout);
+      break;
+    }
+  }
+documented_pair_shutdown:
+  gpio_set_level(PIN_BLK, 1);
+  gpio_set_level(PIN_HV, 0);
+  gpio_set_level(PIN_EF, 0);
+  printf("DOCUMENTED PAIR test ended; HV/EF off: %s\n",
+         esp_err_to_name(err));
+  fflush(stdout);
+  return err;
+}
+
 /* Pixel-coordinate diagnostic: verify row ordering, single-pixel isolation,
  * and asymmetric shapes on independently validated columns 4,5,6.
  *
