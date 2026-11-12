@@ -86,9 +86,9 @@ void app_main(void) {
   // diagnostics BEFORE the first SPI call, never concurrently with it.
   ESP_ERROR_CHECK(mn12832l_spi_dry_run(frame));
 
-  // Supervised bounded diagnostic: grow then erase a 16-row vertical bar.
-  ESP_ERROR_CHECK(mn12832l_spi_documented_pair_ab_test());
-  // ESP_ERROR_CHECK(mn12832l_spi_graphics_demo());
+  // Supervised bounded graphics reel using the documented grid pairs.
+  ESP_ERROR_CHECK(mn12832l_spi_graphics_demo());
+  // ESP_ERROR_CHECK(mn12832l_spi_documented_pair_ab_test());
   // ESP_ERROR_CHECK(mn12832l_spi_c5_auto_sweep());
   // ESP_ERROR_CHECK(mn12832l_spi_column5_dwell_test());
   // ESP_ERROR_CHECK(mn12832l_spi_pixel_coordinates_test());
